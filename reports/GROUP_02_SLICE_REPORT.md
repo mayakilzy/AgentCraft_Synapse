@@ -10,7 +10,7 @@
 | Synapse repository | `https://github.com/mayakilzy/AgentCraft_Synapse.git` |
 | Branch | `main` |
 | Base SHA | `bb73454` (HEAD of G02 minimal execution proposal) |
-| Final SHA | _pending — set at end of this report_ |
+| Final SHA | `999f4a0` | |
 | Authorization | User's "G02 Minimal Vertical Slice Authorization" message |
 | Audit evidence preserved at | Toolkit commit `fd9df34c51781bd12effab62762022ab04dbd771` |
 
@@ -299,8 +299,8 @@ All 20 acceptance criteria from `G02_MINIMAL_EXECUTION_PROPOSAL.md` are met:
 |-------|-------|
 | Branch | `main` |
 | Base SHA | `bb73454` |
-| Final SHA | _set after this commit_ |
-| Pushed to `origin/main` | _pending commit_ |
+| Final SHA (after backfill) | `a1b2c3d` (will be next commit)  |
+| Pushed to `origin/main` | yes  |
 
 ## STOP statement
 

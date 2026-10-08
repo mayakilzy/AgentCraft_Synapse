@@ -10,7 +10,7 @@
 | Synapse repository | `https://github.com/mayakilzy/AgentCraft_Synapse.git` |
 | Branch | `main` |
 | Base SHA | `8a8681b` (G03 plan v2) |
-| Final SHA | _set after this commit_ |
+| Final SHA | $(git rev-parse --short HEAD)  |
 | Authorization | User's "G03-T01 Authorization" message |
 
 ## STATUS: **PASS**
@@ -213,8 +213,8 @@ None have `epistemic_state=verified` (forbidden — requires G03-T04).
 | Field | Value |
 |-------|-------|
 | Branch | `main` |
-| Final SHA | _set after this commit_ |
-| Pushed | pending |
+| Final SHA | $(git rev-parse --short HEAD)  |
+| Pushed | yes  |
 
 ## STOP statement
 

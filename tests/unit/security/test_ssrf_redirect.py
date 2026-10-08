@@ -65,21 +65,28 @@ async def test_transport_validates_file_scheme():
 
 @pytest.mark.asyncio
 async def test_transport_delegates_to_wrapped_for_safe_urls():
-    """For a safe URL, the transport delegates to the wrapped transport
-    and returns its response."""
+    """For a safe URL, the transport validates + pins the IP, then
+    delegates to the wrapped transport with a rewritten URL."""
     fake_wrapped = MagicMock()
     fake_response = httpx.Response(200, text="OK")
     fake_wrapped.handle_async_request = AsyncMock(return_value=fake_response)
 
     transport = SSRFGuardedAsyncTransport(wrapped=fake_wrapped)
-    # Use a hostname that resolves to a public IP.
-    # We patch validate_url to skip the real DNS resolution in the test env.
-    with patch("synapse.security.http_transport.validate_url", return_value="https://example.com/"):
+    # Patch validate_url_with_pin to return a known safe IP without
+    # doing real DNS resolution in the test env.
+    with patch(
+        "synapse.security.http_transport.validate_url_with_pin",
+        return_value=("https://example.com/", "93.184.216.34"),
+    ):
         request = httpx.Request("GET", "https://example.com/")
         response = await transport.handle_async_request(request)
         assert response.status_code == 200
         assert response.text == "OK"
-        fake_wrapped.handle_async_request.assert_called_once_with(request)
+        # The wrapped transport was called — with a rewritten URL using the pinned IP
+        actual_request = fake_wrapped.handle_async_request.call_args[0][0]
+        assert "93.184.216.34" in str(actual_request.url)
+        assert actual_request.headers.get("host") == "example.com"
+        assert actual_request.extensions.get("sni_hostname") == "example.com"
 
 
 # ── Redirect-defense tests ──────────────────────────────────────────────────

@@ -38,16 +38,18 @@ def test_404_returns_problem_envelope(client):
 
 
 def test_422_validation_error_envelope(client, auth_headers_reader):
-    """Per ADR-0006 — validation errors return the standard envelope."""
-    # Force a 422 by hitting an endpoint with a wrong-shape body.
-    # The /api/v1/system/activity-mode PUT takes arbitrary JSON,
-    # but if we send malformed JSON the parser rejects it with 422.
-    # Easier: skip this case — we have plenty of others covering the envelope.
-    # Instead, exercise the placeholder 501 path and assert it returns the envelope.
+    """Per ADR-0006 — validation errors return the standard envelope.
+
+    The G02 minimal slice implemented POST /api/v1/sources/discover,
+    which now requires a JSON body with `query`. Sending no body
+    returns 422 (validation error) with the standard envelope.
+    """
     r = client.post("/api/v1/sources/discover", headers=auth_headers_reader)
-    assert r.status_code == 501
+    assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "not_implemented"
+    assert body["error"]["code"] == "validation_error"
+    assert body["error"]["message"] is not None
+    assert body["meta"]["api_version"] == "v1"
 
 
 def test_request_id_header_always_present(client):
@@ -82,7 +84,9 @@ def test_internal_error_returns_envelope(client):
 
 
 def test_error_handler_wired_for_domain_errors(client, auth_headers_reader):
-    """DomainError → 501 (the placeholder handlers raise UnsupportedFeatureError)."""
+    """DomainError → envelope. The /sources/discover endpoint is now
+    implemented in G02; sending no body triggers a 422 validation error
+    that flows through the standard error envelope."""
     r = client.post("/api/v1/sources/discover", headers=auth_headers_reader)
     body = r.json()
     assert body["error"] is not None

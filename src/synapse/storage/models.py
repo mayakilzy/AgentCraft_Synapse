@@ -153,3 +153,46 @@ class ProviderRow(Base):
         UniqueConstraint("name", name="uq_providers_name"),
         Index("ix_providers_kind", "kind"),
     )
+
+
+class EvidenceFragmentRow(Base):
+    """Persistent EvidenceFragment row.
+
+    Added in G02 minimal slice (migration 0002_evidence_fragments).
+    Persists extracted text + provenance per DOMAIN_AND_API_CONTRACTS.md
+    invariant §1 ("every verified claim and explicit relationship has at
+    least one inspectable evidence fragment").
+    """
+
+    __tablename__ = "evidence_fragments"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    acquisition_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    document_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exact_excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    excerpt_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Provenance metadata per user's G02 authorization §Architecture.
+    # Unknown metadata stays null (never fabricated).
+    title: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    author: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    published_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retrieved_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    citation_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    toolkit_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extraction_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    section: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_evidence_fragments_acquisition_id", "acquisition_id"),
+        Index("ix_evidence_fragments_source_id", "source_id"),
+        Index("ix_evidence_fragments_content_fingerprint", "content_fingerprint"),
+        Index("ix_evidence_fragments_excerpt_hash", "excerpt_hash"),
+    )

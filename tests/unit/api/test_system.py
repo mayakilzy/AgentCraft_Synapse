@@ -47,12 +47,13 @@ def test_cancel_job_returns_501(client, auth_headers_admin):
 
 
 def test_future_routes_return_501(client, auth_headers_reader):
-    """All routes declared in DOMAIN_AND_API_CONTRACTS.md but not yet
-    implemented must return 501, not 200, per START_HERE §10."""
+    """All routes declared in DOMAIN_AND_API_CONTRACTS.md but NOT YET
+    implemented must return 501, not 200, per START_HERE §10.
+
+    The G02 minimal slice implemented the /sources/* routes, so they
+    are excluded from this list (they return 200/422, not 501).
+    """
     paths = [
-        ("POST", "/api/v1/sources/discover"),
-        ("POST", "/api/v1/sources/ingest"),
-        ("GET", "/api/v1/sources"),
         ("GET", "/api/v1/entities"),
         ("GET", "/api/v1/relationships"),
         ("POST", "/api/v1/knowledge/search"),

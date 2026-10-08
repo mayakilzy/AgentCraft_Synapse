@@ -48,6 +48,20 @@ def event_loop():
 
 
 @pytest.fixture(autouse=True)
+def _skip_live_tests_by_default(request):
+    """Skip tests marked @live unless -m live is given on the command line.
+
+    Per the user's G02 authorization §Required Tests: "Distinguish
+    network-dependent tests from deterministic tests and avoid making CI
+    dependent on live arXiv availability."
+    """
+    if request.node.get_closest_marker("live") is not None:
+        option = request.config.getoption("-m")
+        if option != "live" and "live" not in (option or ""):
+            pytest.skip("live test — run with: pytest -m live")
+
+
+@pytest.fixture(autouse=True)
 def _clear_settings_cache():
     """Each test gets fresh settings (because we may mutate env).
 

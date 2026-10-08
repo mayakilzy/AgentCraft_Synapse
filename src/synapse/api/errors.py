@@ -161,7 +161,7 @@ def register_error_handlers(app: FastAPI) -> None:
         problem, _ = _build_problem(
             code="validation_error",
             message="Request payload failed validation.",
-            http_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            http_status=status.HTTP_422_UNPROCESSABLE_CONTENT,
             details=exc.errors(),
             request_id=rid,
         )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from synapse.api.v1 import capabilities, health, providers, system
+from synapse.api.v1 import capabilities, health, providers, sources, system
 
 # Health endpoints live at root level (/health/*) per DOMAIN_AND_API_CONTRACTS.md
 # — they're system probes, not API content.
@@ -13,6 +13,7 @@ health_router = health.router
 router = APIRouter(prefix="/api/v1")
 router.include_router(capabilities.router)
 router.include_router(providers.router)
+router.include_router(sources.router)
 router.include_router(system.router)
 router.include_router(system.jobs_router)
 
@@ -38,37 +39,9 @@ def _not_implemented(feature: str):
     return _handler
 
 
-# Sources
-_placeholder.add_api_route(
-    "/sources/discover",
-    _not_implemented("POST /sources/discover"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/sources/ingest",
-    _not_implemented("POST /sources/ingest"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/sources",
-    _not_implemented("GET /sources"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/sources/{source_id}",
-    _not_implemented("GET /sources/{id}"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/sources/{source_id}/acquisitions",
-    _not_implemented("GET /sources/{id}/acquisitions"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# Sources — implemented in G02 minimal slice (src/synapse/api/v1/sources.py).
+# These routes are no longer placeholders; do not duplicate them here.
+
 
 # Entities / relationships / claims
 _placeholder.add_api_route(

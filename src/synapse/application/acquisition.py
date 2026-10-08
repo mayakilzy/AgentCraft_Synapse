@@ -23,21 +23,24 @@ three minimal-slice providers are used here.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synapse.observability.logging import get_logger
 from synapse.providers import get as get_provider
+from synapse.security.http_transport import ssrf_guarded_client
 from synapse.security.ssrf import SSRFError, validate_url
 from synapse.storage.models import (
     AuditEventRow,
     EvidenceFragmentRow,
-    JobRow,
     SourceRow,
 )
 
@@ -114,8 +117,6 @@ async def acquire_and_extract(
     # with a successful Acquisition? If so, return the existing
     # evidence_fragments instead of re-fetching. (Per DOMAIN_AND_API_CONTRACTS.md
     # invariant §4.)
-    from sqlalchemy import select
-
     existing_source = await session.execute(
         select(SourceRow).where(SourceRow.canonical_uri == validated_url)
     )
@@ -140,21 +141,19 @@ async def acquire_and_extract(
     html_bytes: bytes | None = None
     content_type: str | None = None
     duration_ms: int | None = None
-    import time
 
     start = time.perf_counter()
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(HTTPX_TIMEOUT),
+        # Per ADR-0009 §2 (Final Qualification §2): use the SSRF-guarded
+        # transport so EVERY URL — including redirect targets — is
+        # validated by synapse.security.ssrf.validate_url before any
+        # bytes are sent. Eliminates the TOCTOU between initial
+        # validate_url() and httpx's automatic redirect-following.
+        async with ssrf_guarded_client(
+            timeout=HTTPX_TIMEOUT,
             follow_redirects=HTTPX_FOLLOW_REDIRECTS,
             max_redirects=5,
         ) as client:
-            # Note: httpx follows redirects automatically; we rely on
-            # validate_url having blocked private IPs at the destination.
-            # A TOCTOU check on each redirect would be ideal; for now,
-            # the initial validate_url catches the common SSRF vectors
-            # (metadata IP, loopback, file://). A future group can add
-            # per-redirect validation if needed.
             async with client.stream("GET", validated_url) as resp:
                 if resp.status_code >= 400:
                     fetch_error = f"http_{resp.status_code}"
@@ -170,6 +169,9 @@ async def acquire_and_extract(
                         chunks.append(chunk)
                     if not fetch_error:
                         html_bytes = b"".join(chunks)
+    except SSRFError as exc:
+        # A redirect target was blocked by the SSRF guard mid-fetch.
+        fetch_error = f"ssrf_blocked_redirect: {exc}"
     except httpx.TimeoutException:
         fetch_error = "timeout"
     except httpx.HTTPError as exc:
@@ -185,8 +187,6 @@ async def acquire_and_extract(
         completeness = "failed"
         content_hash = None
     else:
-        import hashlib
-
         content_hash = hashlib.sha256(html_bytes).hexdigest()[:16]
         acq_status = "succeeded"
         completeness = "full"
@@ -235,10 +235,7 @@ async def acquire_and_extract(
             "acquisition_id": acquisition_id,
             "request_id": request_id,
         }
-    try:
-        html_text = html_bytes.decode("utf-8", errors="replace")
-    except Exception:
-        html_text = html_bytes.decode("latin-1", errors="replace")
+    html_text = html_bytes.decode("utf-8", errors="replace")
     extraction = extractor.extract(html_text, source_uri=validated_url)
     if not extraction.get("ok"):
         await _audit(
@@ -265,8 +262,6 @@ async def acquire_and_extract(
         fp_result = delta_hasher.run(extracted_text)
         content_fingerprint = fp_result["fingerprint"]
     else:
-        import hashlib
-
         content_fingerprint = hashlib.md5(extracted_text.encode("utf-8")).hexdigest()
 
     # ── Stage 6: persist EvidenceFragment row ─────────────────────────
@@ -386,7 +381,3 @@ async def _audit(
     )
     session.add(row)
     await session.flush()
-
-
-# Unused import cleanup — JobRow imported for future job-runner integration.
-_ = JobRow

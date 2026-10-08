@@ -18,11 +18,13 @@ from typing import Any
 
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from synapse.api.deps import DbSessionDep, PrincipalDep, RequestIDDep
-from synapse.api.errors import NotFoundError
+from synapse.api.errors import DomainError, NotFoundError
 from synapse.api.responses import Envelope
 from synapse.application.acquisition import acquire_and_extract, discover_sources
+from synapse.storage.models import AuditEventRow, EvidenceFragmentRow, SourceRow
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -102,8 +104,6 @@ async def ingest(
         requester=principal.subject,
     )
     if not r.get("ok"):
-        from synapse.api.errors import DomainError
-
         return Envelope.failure(
             error=DomainError(r.get("error", "ingest failed")),
             request_id=request_id,
@@ -121,10 +121,6 @@ async def list_sources(
     request_id: RequestIDDep,
 ) -> Envelope[dict]:
     """List all Sources (most recent first)."""
-    from sqlalchemy import select
-
-    from synapse.storage.models import SourceRow
-
     stmt = select(SourceRow).order_by(SourceRow.created_at.desc()).limit(50)
     rows = (await session.execute(stmt)).scalars().all()
     return Envelope.success(
@@ -160,10 +156,6 @@ async def get_source(
     request_id: RequestIDDep,
 ) -> Envelope[dict]:
     """Get a single Source by ID."""
-    from sqlalchemy import select
-
-    from synapse.storage.models import SourceRow
-
     stmt = select(SourceRow).where(SourceRow.id == source_id)
     r = (await session.execute(stmt)).scalar_one_or_none()
     if r is None:
@@ -202,10 +194,6 @@ async def list_acquisitions(
     schema does not have an ``acquisitions`` table; this is the
     least-invasive reuse of existing contracts per ADR-0009 §4).
     """
-    from sqlalchemy import select
-
-    from synapse.storage.models import AuditEventRow, EvidenceFragmentRow
-
     stmt = (
         select(AuditEventRow)
         .where(

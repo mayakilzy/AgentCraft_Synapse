@@ -70,7 +70,7 @@ async def test_end_to_end_pipeline_with_fixture_html(app, db_session):
     fake_client.stream = MagicMock(return_value=fake_response)
     fake_client.timeout = MagicMock()
 
-    with patch("synapse.application.acquisition.httpx.AsyncClient", return_value=fake_client):
+    with patch("synapse.application.acquisition.ssrf_guarded_client", return_value=fake_client):
         r = await acquire_and_extract(
             db_session,
             canonical_uri=fixture_uri,
@@ -129,7 +129,7 @@ async def test_duplicate_ingest_same_uri_creates_one_source(app, db_session):
         return fake_client
 
     with patch(
-        "synapse.application.acquisition.httpx.AsyncClient", return_value=_make_fake_client()
+        "synapse.application.acquisition.ssrf_guarded_client", return_value=_make_fake_client()
     ):
         r1 = await acquire_and_extract(
             db_session,
@@ -249,7 +249,7 @@ async def test_provider_failure_http_500(app, db_session):
     fake_client.__aexit__ = AsyncMock(return_value=None)
     fake_client.stream = MagicMock(return_value=fake_response)
 
-    with patch("synapse.application.acquisition.httpx.AsyncClient", return_value=fake_client):
+    with patch("synapse.application.acquisition.ssrf_guarded_client", return_value=fake_client):
         r = await acquire_and_extract(
             db_session,
             canonical_uri="https://example.com/failing",
@@ -280,7 +280,7 @@ async def test_provider_timeout(app, db_session):
     fake_stream.__aexit__ = AsyncMock(return_value=None)
     fake_client.stream = MagicMock(return_value=fake_stream)
 
-    with patch("synapse.application.acquisition.httpx.AsyncClient", return_value=fake_client):
+    with patch("synapse.application.acquisition.ssrf_guarded_client", return_value=fake_client):
         r = await acquire_and_extract(
             db_session,
             canonical_uri="https://example.com/slow",

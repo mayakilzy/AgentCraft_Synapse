@@ -1,0 +1,23 @@
+[
+  {
+    "label": "0001_initial upgrade",
+    "valid": true,
+    "error": null,
+    "statements": 5,
+    "preview": "            CREATE TABLE evidence_fragments (\n                id VARCHAR(64) NOT NULL,\n                acquisition_id VARCHAR(64) NOT NULL,\n                source_id VARCHAR(64),\n                sourc"
+  },
+  {
+    "label": "0002_evidence_fragments upgrade",
+    "valid": true,
+    "error": null,
+    "statements": 5,
+    "preview": "            CREATE TABLE evidence_fragments (\n                id VARCHAR(64) NOT NULL,\n                acquisition_id VARCHAR(64) NOT NULL,\n                source_id VARCHAR(64),\n                sourc"
+  },
+  {
+    "label": "0002_evidence_fragments downgrade",
+    "valid": true,
+    "error": null,
+    "statements": 5,
+    "preview": "            DROP INDEX ix_evidence_fragments_excerpt_hash;\n            DROP INDEX ix_evidence_fragments_content_fingerprint;\n            DROP INDEX ix_evidence_fragments_source_id;\n            DROP IN"
+  }
+]

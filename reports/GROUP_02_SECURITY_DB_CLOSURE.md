@@ -9,7 +9,7 @@
 | Synapse repository | `https://github.com/mayakilzy/AgentCraft_Synapse.git` |
 | Branch | `main` |
 | Base SHA | `d6068d3` (HEAD of G02 final qualification) |
-| Final SHA | _set after this commit_ |
+| Final SHA | `508f1d3`  |
 | Authorization | User's "G02 Final Security & Database Closure" message |
 
 ## Overall STATUS: **PASS_WITH_LIMITATION**
@@ -218,8 +218,8 @@ docker stop synapse-pg-test
 |-------|-------|
 | Branch | `main` |
 | Base SHA | `d6068d3` |
-| Final SHA | _set after this commit_ |
-| Pushed to `origin/main` | _pending commit_ |
+| Final SHA | `508f1d3`  |
+| Pushed to `origin/main` | yes  |
 
 ## STOP statement
 

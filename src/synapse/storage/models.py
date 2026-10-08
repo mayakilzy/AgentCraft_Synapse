@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from sqlalchemy import (
     JSON,
     DateTime,
+    Float,
     Index,
     Integer,
     String,
@@ -195,4 +196,80 @@ class EvidenceFragmentRow(Base):
         Index("ix_evidence_fragments_source_id", "source_id"),
         Index("ix_evidence_fragments_content_fingerprint", "content_fingerprint"),
         Index("ix_evidence_fragments_excerpt_hash", "excerpt_hash"),
+    )
+
+
+class EntityRow(Base):
+    """Canonical entity registry row (G03-T01)."""
+
+    __tablename__ = "entities"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    canonical_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    aliases: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    attributes: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON dict
+    canonical_uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_entities_canonical_name", "canonical_name"),
+        Index("ix_entities_kind", "kind"),
+        Index("ix_entities_canonical_uri", "canonical_uri"),
+    )
+
+
+class ClaimRow(Base):
+    """Claim row — a proposition with epistemic state (G03-T01)."""
+
+    __tablename__ = "claims"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposition: Mapped[str] = mapped_column(String(2048), nullable=False)
+    subject_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    object_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_refs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    epistemic_state: Mapped[str] = mapped_column(String(32), nullable=False, default="hypothesized")
+    confidence_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    validity_conditions: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    contradicting_refs: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    superseded_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    extraction_method: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_claims_epistemic_state", "epistemic_state"),
+        Index("ix_claims_subject_ref", "subject_ref"),
+        Index("ix_claims_object_ref", "object_ref"),
+    )
+
+
+class SourceSpanRow(Base):
+    """Precise evidence reference (G03-T01).
+
+    Per requirement #8: preserves source spans so knowledge claims
+    can be traced back to their supporting content.
+    """
+
+    __tablename__ = "source_spans"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    evidence_fragment_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    start_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    context_before: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context_after: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_source_spans_evidence_fragment_id", "evidence_fragment_id"),
+        Index("ix_source_spans_claim_id", "claim_id"),
     )

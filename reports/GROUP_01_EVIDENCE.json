@@ -2,7 +2,7 @@
   "group": "G01",
   "status": "PASS",
   "base_commit": null,
-  "final_commit": "pending — committed at end of G01",
+  "final_commit": "7a9088a83cf37ed269c53c36facb4a1ee288271a",
   "clean_tree": true,
   "tasks": [
     {

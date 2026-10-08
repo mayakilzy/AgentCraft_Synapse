@@ -10,7 +10,7 @@
 | Synapse repository | `https://github.com/mayakilzy/AgentCraft_Synapse.git` |
 | Synapse branch | `main` |
 | Synapse base SHA | `d03f176` (HEAD of G02 audit policy amendment) |
-| Synapse final SHA | _pending — set after this report commits_ |
+| Synapse final SHA | `13a2014` |
 | Toolkit repository (audited) | `https://github.com/mayakilzy/AgentCraft-Toolkit.git` |
 | Toolkit branch | `main` |
 | Toolkit commit SHA | `fd9df34c51781bd12effab62762022ab04dbd771` |

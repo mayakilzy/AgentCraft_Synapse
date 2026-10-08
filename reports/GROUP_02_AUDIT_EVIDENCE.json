@@ -7,9 +7,9 @@
     "url": "https://github.com/mayakilzy/AgentCraft_Synapse.git",
     "branch": "main",
     "base_commit": "d03f176",
-    "final_commit": "pending — set after this commit",
+    "final_commit": "13a2014",
     "clean_tree": true,
-    "pushed_to_origin": "pending"
+    "pushed_to_origin": true
   },
   "toolkit_repository": {
     "url": "https://github.com/mayakilzy/AgentCraft-Toolkit.git",

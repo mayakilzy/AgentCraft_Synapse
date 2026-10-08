@@ -2,14 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentcraft-synapse.local/schemas/layer1_capability_matrix.schema.json",
   "title": "Layer-1 Capability Matrix",
-  "description": "Output schema for the G02 audit's Layer-1 Capability Matrix. Each row is one (capability_domain × tool) classification, with verification evidence attached when the tool is marked 'verified_runnable'.",
+  "description": "Output schema for the G02 audit's Layer-1 Capability Matrix. Per ADR-0008: import success alone must NEVER imply verified_runnable — every row carries four cumulative verification flags plus a derived disposition. License conflicts are flagged for review, NOT auto-rejected.",
   "type": "object",
-  "required": ["audit_version", "generated_at", "toolkit_index_source", "rows", "summary"],
+  "required": ["audit_version", "schema_version", "generated_at", "toolkit_index_source", "rows", "summary"],
   "additionalProperties": false,
   "properties": {
     "audit_version": {
       "type": "string",
       "description": "Audit iteration identifier (e.g. '1.0')."
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "Matrix schema version. Bumped on every breaking change.",
+      "const": "2.0"
     },
     "generated_at": {
       "type": "string",
@@ -19,37 +24,70 @@
       "type": "string",
       "description": "Path or URL of TOOLKIT_INDEX(1).json used as input."
     },
+    "verification_results_source": {
+      "type": ["string", "null"],
+      "description": "Path to verification_results.json from verify_tool_imports.py."
+    },
+    "smoke_results_source": {
+      "type": ["string", "null"],
+      "description": "Path to smoke_results.json from functional_smoke_tests.py."
+    },
     "rows": {
       "type": "array",
       "items": {"$ref": "#/$defs/matrix_row"}
     },
     "summary": {
       "type": "object",
-      "required": ["total_tools", "indexed_only", "verified_runnable", "adopted", "deferred", "rejected", "gaps"],
+      "required": [
+        "total_tools",
+        "indexed_only",
+        "package_available_only",
+        "import_only",
+        "functional_smoke_passed",
+        "production_ready",
+        "flagged_for_legal_review",
+        "deferred",
+        "rejected",
+        "adopted",
+        "gaps"
+      ],
       "properties": {
-        "total_tools":        {"type": "integer", "minimum": 0},
-        "indexed_only":       {"type": "integer", "minimum": 0},
-        "verified_runnable":  {"type": "integer", "minimum": 0},
-        "adopted":            {"type": "integer", "minimum": 0},
-        "deferred":           {"type": "integer", "minimum": 0},
-        "rejected":           {"type": "integer", "minimum": 0},
+        "total_tools":                  {"type": "integer", "minimum": 0},
+        "indexed_only":                 {"type": "integer", "minimum": 0},
+        "package_available_only":       {"type": "integer", "minimum": 0},
+        "import_only":                  {"type": "integer", "minimum": 0},
+        "functional_smoke_passed":      {"type": "integer", "minimum": 0},
+        "production_ready":             {"type": "integer", "minimum": 0},
+        "flagged_for_legal_review":     {"type": "integer", "minimum": 0},
+        "deferred":                     {"type": "integer", "minimum": 0},
+        "rejected":                     {"type": "integer", "minimum": 0},
+        "adopted":                      {"type": "integer", "minimum": 0},
         "gaps": {
           "type": "array",
           "items": {"$ref": "#/$defs/gap"},
-          "description": "Capability domains with no verified-runnable tool."
+          "description": "Capability domains with no production_ready or functional_smoke_passed tool."
         }
       }
     },
     "decisions_required": {
       "type": "array",
       "items": {"type": "object"},
-      "description": "Open decisions for the user (e.g. paid API keys, ToS review)."
+      "description": "Open decisions for the user (e.g. paid API keys, legal review of GPL components, ToS review)."
     }
   },
   "$defs": {
     "matrix_row": {
       "type": "object",
-      "required": ["tool_name", "capability_domain", "classification", "evidence_provenance"],
+      "required": [
+        "tool_name",
+        "capability_domain",
+        "disposition",
+        "package_available",
+        "import_succeeded",
+        "functional_smoke_passed",
+        "production_ready",
+        "evidence_provenance"
+      ],
       "additionalProperties": false,
       "properties": {
         "tool_name": {
@@ -63,26 +101,72 @@
             "extraction", "scientific", "social", "provenance", "other"
           ]
         },
-        "classification": {
+        "disposition": {
           "type": "string",
-          "enum": ["indexed_only", "verified_runnable", "adopted", "deferred", "rejected"]
+          "enum": [
+            "indexed_only",
+            "package_available_only",
+            "import_only",
+            "functional_smoke_passed",
+            "production_ready",
+            "flagged_for_legal_review",
+            "deferred",
+            "rejected",
+            "adopted"
+          ],
+          "description": "Derived from the four verification flags + license review status."
+        },
+        "package_available": {
+          "type": "boolean",
+          "description": "Stage 1: the package can be located (pip show / importlib.metadata / filesystem)."
+        },
+        "import_succeeded": {
+          "type": "boolean",
+          "description": "Stage 2: `import <tool>` exited 0."
+        },
+        "functional_smoke_passed": {
+          "type": ["boolean", "null"],
+          "description": "Stage 3: real functional smoke test passed. null = not tested (with reason)."
+        },
+        "functional_smoke_skipped_reason": {
+          "type": ["string", "null"],
+          "description": "Required when functional_smoke_passed is null. Example: 'credentials unavailable', 'network restricted', 'runtime not configured'."
+        },
+        "production_ready": {
+          "type": ["boolean", "null"],
+          "description": "Stage 4: production-readiness checklist met. null = not assessed."
         },
         "evidence_provenance": {
           "type": "string",
-          "description": "What evidence backs this classification."
+          "description": "What evidence backs this row's classification."
         },
         "license": {
           "type": ["string", "null"],
-          "description": "SPDX identifier or human-readable license."
+          "description": "SPDX identifier or human-readable license text."
         },
-        "license_conflict": {
+        "license_review_required": {
           "type": "boolean",
-          "description": "True if license conflicts with proprietary distribution."
+          "description": "True if license is in the review-required list (per ADR-0008 §3). NOT an auto-reject."
+        },
+        "license_review_reason": {
+          "type": ["string", "null"],
+          "description": "Short explanation of why review is required (copyleft, non-commercial, no-commercial-redistribution, etc.)."
+        },
+        "license_integration_implications": {
+          "type": ["string", "null"],
+          "description": "What integrating the tool would mean (linking model, attribution, source-disclosure obligation)."
+        },
+        "license_distribution_implications": {
+          "type": ["string", "null"],
+          "description": "What distributing the tool to end-users would mean (shipping it vs SaaS-only, attribution notices, etc.)."
         },
         "version_declared": {"type": ["string", "null"]},
         "version_installed": {"type": ["string", "null"]},
         "import_command": {"type": ["string", "null"]},
         "import_exit_code": {"type": ["integer", "null"]},
+        "functional_smoke_command": {"type": ["string", "null"]},
+        "functional_smoke_exit_code": {"type": ["integer", "null"]},
+        "functional_smoke_tested_at": {"type": ["string", "null"]},
         "test_count": {"type": ["integer", "null"]},
         "supported_sources": {
           "type": "array",
@@ -102,12 +186,45 @@
         },
         "dependencies": {
           "type": "array",
-          "items": {"type": "string"},
-          "description": "Other tools/packages this tool requires."
+          "items": {"type": "string"}
         },
         "operational_risks": {
           "type": "array",
           "items": {"type": "string"}
+        },
+        "provenance_preservation": {
+          "type": "object",
+          "description": "Per ADR-0008 §4: how well does this tool preserve source structure, metadata, links, citations, versions?",
+          "required": [
+            "source_structure_preserved",
+            "metadata_preserved",
+            "links_preserved",
+            "citations_preserved",
+            "version_preserved"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "source_structure_preserved": {
+              "type": ["boolean", "null"],
+              "description": "Headings, paragraphs, code, tables, lists retained."
+            },
+            "metadata_preserved": {
+              "type": ["boolean", "null"],
+              "description": "Source URI, timestamp, author, publisher retained."
+            },
+            "links_preserved": {
+              "type": ["boolean", "null"],
+              "description": "Hyperlinks (anchor text + href) retained."
+            },
+            "citations_preserved": {
+              "type": ["boolean", "null"],
+              "description": "Citation references (DOI, arXiv ID, BibTeX) retained."
+            },
+            "version_preserved": {
+              "type": ["boolean", "null"],
+              "description": "Source version (commit SHA, page revision) retained."
+            }
+          }
         },
         "notes": {"type": ["string", "null"]}
       }
@@ -115,6 +232,7 @@
     "gap": {
       "type": "object",
       "required": ["capability_domain", "reason", "recommended_remediation"],
+      "additionalProperties": false,
       "properties": {
         "capability_domain": {
           "type": "string",

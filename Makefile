@@ -56,27 +56,41 @@ audit-validate:  ## Validate TOOLKIT_INDEX(1).json against schema
 	  $(PYTHON) scripts/validate_toolkit_index.py "docs/toolkit_audit/TOOLKIT_INDEX(1).json"; \
 	fi
 
-audit-verify-imports:  ## Verify which indexed tools are actually importable
+audit-verify-imports:  ## Verify which indexed tools are actually importable (stage 1 + stage 2)
 	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
 	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
 	else \
 	  $(PYTHON) scripts/verify_tool_imports.py "docs/toolkit_audit/TOOLKIT_INDEX(1).json"; \
 	fi
 
-audit-generate-matrix:  ## Generate Layer-1 Capability Matrix from index + verification
+audit-smoke:  ## Run functional smoke tests for shortlisted providers (stage 3, per ADR-0008)
 	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
 	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
 	elif [ ! -f "docs/toolkit_audit/verification_results.json" ]; then \
 	  echo "Run 'make audit-verify-imports' first."; exit 1; \
 	else \
+	  $(PYTHON) scripts/functional_smoke_tests.py "docs/toolkit_audit/verification_results.json"; \
+	fi
+
+audit-generate-matrix:  ## Generate Layer-1 Capability Matrix (schema v2.0) from index + verification + smoke
+	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
+	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
+	elif [ ! -f "docs/toolkit_audit/verification_results.json" ]; then \
+	  echo "Run 'make audit-verify-imports' first."; exit 1; \
+	else \
+	  SMOKE_ARG=""; \
+	  if [ -f "docs/toolkit_audit/smoke_results.json" ]; then \
+	    SMOKE_ARG="docs/toolkit_audit/smoke_results.json"; \
+	  fi; \
 	  $(PYTHON) scripts/generate_capability_matrix.py \
 	    "docs/toolkit_audit/TOOLKIT_INDEX(1).json" \
 	    "docs/toolkit_audit/verification_results.json" \
+	    $$SMOKE_ARG \
 	    --out-json "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.json" \
 	    --out-md   "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.md"; \
 	fi
 
-audit-all: audit-validate audit-verify-imports audit-generate-matrix  ## Full audit pipeline
+audit-all: audit-validate audit-verify-imports audit-smoke audit-generate-matrix  ## Full audit pipeline (per ADR-0008)
 
 smoke:  ## Run smoke tests against a running service (uvicorn must be up)
 	$(PYTHON) -c "import httpx; r=httpx.get('http://127.0.0.1:8000/health/live'); \

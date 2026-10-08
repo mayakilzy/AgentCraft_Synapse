@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcraft-synapse"
+version = "0.1.0"
+description = "AgentCraft Synapse — relationship-aware knowledge, hypothesis & future intelligence engine."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary — internal use only" }
+authors = [{ name = "AgentCraft Synapse Team" }]
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    "pydantic>=2.6,<3.0",
+    "pydantic-settings>=2.2,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "alembic>=1.13,<2.0",
+    "httpx>=0.27,<1.0",
+    "anyio>=4.2,<5.0",
+    "python-multipart>=0.0.9,<1.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.1,<4.0",
+]
+dev = [
+    "pytest>=8.0,<10.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "pytest-cov>=4.1,<7.0",
+    "ruff>=0.4,<1.0",
+    "httpx>=0.27,<1.0",
+    "aiosqlite>=0.20,<1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "RUF", # ruff specific
+]
+ignore = [
+    "E501",   # line length handled by formatter
+    "B008",   # FastAPI Depends() in defaults is intentional
+    "SIM102", # nested ifs are sometimes clearer
+    "SIM117", # nested withs in tests are clearer with separate contexts
+    "UP042",  # StrEnum migration would change Pydantic behavior; deferred
+    "UP046",  # PEP 695 generics require careful migration; deferred
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "S101"]
+"alembic/**" = ["E", "W", "F"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+    "--cov=synapse",
+    "--cov-report=term-missing",
+    "--cov-report=xml:reports/coverage.xml",
+    "--cov-report=html:reports/coverage_html",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::DeprecationWarning:pytest.*",
+]
+
+[tool.coverage.run]
+source = ["src/synapse"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/alembic/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

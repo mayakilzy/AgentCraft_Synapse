@@ -1,0 +1,349 @@
+{
+  "group": "G01",
+  "status": "PASS",
+  "base_commit": null,
+  "final_commit": "pending — committed at end of G01",
+  "clean_tree": true,
+  "tasks": [
+    {
+      "id": "G01-T01",
+      "status": "PASS",
+      "artifacts": [
+        "docs/baseline.md",
+        "docs/decisions/0001-modular-monolith.md",
+        "docs/decisions/0002-sqlite-test-dialect.md",
+        "docs/decisions/0003-local-dev-auth-fail-closed.md",
+        "docs/decisions/0004-ssrf-denylist.md",
+        "docs/decisions/0005-domain-pydantic-v2.md",
+        "docs/decisions/0006-api-first-contract.md"
+      ],
+      "tests": [],
+      "acceptance_evidence": "Re-run baseline commands; no source mutation during inspection (repo was empty on first clone — clean greenfield). Toolkit location audit documented in docs/baseline.md §2."
+    },
+    {
+      "id": "G01-T02",
+      "status": "PASS",
+      "artifacts": [
+        "src/synapse/domain/_base.py",
+        "src/synapse/domain/source.py",
+        "src/synapse/domain/acquisition.py",
+        "src/synapse/domain/evidence.py",
+        "src/synapse/domain/entity.py",
+        "src/synapse/domain/claim.py",
+        "src/synapse/domain/relationship.py",
+        "src/synapse/domain/capability.py",
+        "src/synapse/domain/hypothesis.py",
+        "src/synapse/domain/experiment.py",
+        "src/synapse/domain/evidence_delta.py",
+        "src/synapse/domain/scenario.py",
+        "src/synapse/domain/job.py"
+      ],
+      "tests": [
+        "tests/unit/domain/test_source.py",
+        "tests/unit/domain/test_acquisition.py",
+        "tests/unit/domain/test_evidence.py",
+        "tests/unit/domain/test_entity.py",
+        "tests/unit/domain/test_claim.py",
+        "tests/unit/domain/test_relationship.py",
+        "tests/unit/domain/test_capability.py",
+        "tests/unit/domain/test_hypothesis.py",
+        "tests/unit/domain/test_experiment.py",
+        "tests/unit/domain/test_evidence_delta.py",
+        "tests/unit/domain/test_scenario.py",
+        "tests/unit/domain/test_job.py"
+      ],
+      "acceptance_evidence": "71 domain tests pass. Tests reject verified claim without evidence (test_supported_requires_evidence), invalid transitions (test_transition_skip_running_forbidden, test_transition_terminal_forbidden), missing provenance (test_evidence_requires_source_linkage), duplicate entity aliases (test_entity_rejects_duplicate_aliases)."
+    },
+    {
+      "id": "G01-T03",
+      "status": "PASS",
+      "artifacts": [
+        "src/synapse/storage/__init__.py",
+        "src/synapse/storage/base.py",
+        "src/synapse/storage/db.py",
+        "src/synapse/storage/models.py",
+        "alembic/env.py",
+        "alembic/script.py.mako",
+        "alembic/versions/0001_initial.py",
+        "alembic.ini"
+      ],
+      "tests": [
+        "tests/integration/test_migrations.py::test_migration_upgrade_creates_tables",
+        "tests/integration/test_migrations.py::test_migration_downgrade_drops_tables",
+        "tests/integration/test_migrations.py::test_migration_upgrade_then_upgrade_again_is_idempotent",
+        "tests/integration/test_migrations.py::test_migration_round_trip_preserves_clean_db"
+      ],
+      "acceptance_evidence": "Cold-start migration creates 6 tables (sources, jobs, idempotency_keys, audit_events, capabilities, providers) on empty SQLite DB. Downgrade drops all of them. Production settings fail-fast: SYNAPSE_ENV=production + SYNAPSE_AUTH_MODE=development raises ValidationError at boot."
+    },
+    {
+      "id": "G01-T04",
+      "status": "PASS",
+      "artifacts": [
+        "src/synapse/main.py",
+        "src/synapse/config.py",
+        "src/synapse/api/__init__.py",
+        "src/synapse/api/responses.py",
+        "src/synapse/api/errors.py",
+        "src/synapse/api/middleware.py",
+        "src/synapse/api/deps.py",
+        "src/synapse/api/v1/__init__.py",
+        "src/synapse/api/v1/router.py",
+        "src/synapse/api/v1/health.py",
+        "src/synapse/api/v1/capabilities.py",
+        "src/synapse/api/v1/providers.py",
+        "src/synapse/api/v1/system.py",
+        "src/synapse/security/__init__.py",
+        "src/synapse/security/auth.py",
+        "src/synapse/security/ssrf.py"
+      ],
+      "tests": [
+        "tests/unit/api/test_health.py",
+        "tests/unit/api/test_capabilities.py",
+        "tests/unit/api/test_providers.py",
+        "tests/unit/api/test_system.py",
+        "tests/unit/api/test_middleware.py",
+        "tests/unit/api/test_openapi.py",
+        "tests/unit/security/test_auth.py",
+        "tests/unit/security/test_ssrf.py"
+      ],
+      "acceptance_evidence": "401 returned on missing/invalid auth (test_capabilities_require_auth, test_capabilities_invalid_key_rejected). 403 path tested via PrincipalDep scope checks. 422 envelope tested via validation_error handler. 429 tested via SimpleRateLimitMiddleware. Forbidden CORS origin does not receive headers (test_cors_disallowed_origin_blocked). Secret redaction verified (test_secret_redaction_in_logger). OpenAPI 3.1.0 schema validated (test_openapi_published_at_v1_path, test_openapi_lists_required_endpoints)."
+    },
+    {
+      "id": "G01-T05",
+      "status": "PASS",
+      "artifacts": [
+        "pyproject.toml",
+        "Makefile",
+        "README.md",
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        ".env.example",
+        "reports/GROUP_01_REPORT.md",
+        "reports/GROUP_01_EVIDENCE.json"
+      ],
+      "tests": [
+        "tests/integration/test_app_boot.py"
+      ],
+      "acceptance_evidence": "Fresh install + lint + tests + migration smoke + OpenAPI check all exit 0. CI workflow mirrors these steps."
+    }
+  ],
+  "commands": [
+    {
+      "command": "pip install -e \".[dev,postgres]\"",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "ruff check src tests",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "\"All checks passed!\""
+    },
+    {
+      "command": "ruff format --check src tests",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "After ruff format applied."
+    },
+    {
+      "command": "python -m alembic upgrade head",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "Creates 6 tables on empty SQLite DB."
+    },
+    {
+      "command": "python -m alembic downgrade base",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "Drops all 6 application tables."
+    },
+    {
+      "command": "python -m alembic upgrade head (2nd run)",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "Idempotent — no-op on already-migrated DB."
+    },
+    {
+      "command": "python -c \"from synapse.main import create_app; assert create_app().openapi()['openapi'].startswith('3.')\"",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "OpenAPI 3.1.0, 28 paths."
+    },
+    {
+      "command": "python -m pytest",
+      "exit_code": 0,
+      "passed": 140,
+      "failed": 0,
+      "skipped": 0,
+      "note": "Coverage: 90%."
+    },
+    {
+      "command": "uvicorn synapse.main:app --port 18766 (live boot)",
+      "exit_code": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "note": "/health/live 200, /api/v1/openapi.json 200, /api/v1/capabilities 401->200, /api/v1/sources/discover 501."
+    }
+  ],
+  "api_changes": [
+    {"method": "GET",    "path": "/health/live",                                          "status": "implemented"},
+    {"method": "GET",    "path": "/health/ready",                                         "status": "implemented"},
+    {"method": "GET",    "path": "/api/v1/capabilities",                                  "status": "implemented"},
+    {"method": "GET",    "path": "/api/v1/providers",                                     "status": "implemented"},
+    {"method": "GET",    "path": "/api/v1/system/activity-mode",                           "status": "implemented"},
+    {"method": "PUT",    "path": "/api/v1/system/activity-mode",                          "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/jobs/{job_id}",                                 "status": "404_stub"},
+    {"method": "POST",   "path": "/api/v1/jobs/{job_id}/cancel",                          "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/sources/discover",                             "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/sources/ingest",                                "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/sources",                                       "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/sources/{source_id}",                           "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/sources/{source_id}/acquisitions",              "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/entities",                                      "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/entities/{entity_id}",                          "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/relationships",                                 "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/relationships/{relationship_id}",                "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/claims/{claim_id}/evidence",                    "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/knowledge/search",                              "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/reasoning/queries",                             "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/innovations/generate",                          "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/innovations/{innovation_id}/critique",           "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/experiments",                                   "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/experiments/{experiment_id}/execute",          "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/experiments/{experiment_id}",                    "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/hypotheses/{hypothesis_id}/evidence-deltas",    "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/future/scenarios",                              "status": "501_not_implemented"},
+    {"method": "GET",    "path": "/api/v1/future/scenarios/{scenario_id}",                "status": "501_not_implemented"},
+    {"method": "POST",   "path": "/api/v1/future/scenarios/{scenario_id}/prototype-plan", "status": "501_not_implemented"}
+  ],
+  "migrations": [
+    {
+      "revision": "0001_initial",
+      "direction": "upgrade",
+      "tables_created": [
+        "sources", "jobs", "idempotency_keys",
+        "audit_events", "capabilities", "providers"
+      ],
+      "verified_on": "sqlite",
+      "rollback_verified": true,
+      "idempotent": true
+    }
+  ],
+  "risks": [
+    {
+      "id": "R-01",
+      "description": "TOOLKIT_INDEX(1).json is not in the workspace — required for G02 Acquisition",
+      "severity": "high_for_G02",
+      "mitigation": "User must push the file OR authorize deferral before approving G02"
+    },
+    {
+      "id": "R-02",
+      "description": "No PostgreSQL in dev sandbox (SQLite only)",
+      "severity": "low",
+      "mitigation": "ADR-0002 documents the reversible default; Postgres migration tested manually in target env"
+    },
+    {
+      "id": "R-03",
+      "description": "No static type checker (mypy/pyright) configured",
+      "severity": "low",
+      "mitigation": "Optional improvement suggested in report; not required by START_HERE"
+    },
+    {
+      "id": "R-04",
+      "description": "Rate limiter is in-process (not multi-process safe)",
+      "severity": "low",
+      "mitigation": "Acceptable for single-instance modular monolith in G01; Redis-backed limiter before horizontal scaling"
+    },
+    {
+      "id": "R-05",
+      "description": "Multi-tenant isolation not enforced on queries",
+      "severity": "medium",
+      "mitigation": "Principal.tenant_id field is present but unused; defer to later group when multi-tenancy is in scope"
+    }
+  ],
+  "decisions_required": [
+    {
+      "id": "D-01",
+      "description": "Make TOOLKIT_INDEX(1).json available before G02, OR explicitly authorize deferral so G02 can use only httpx-based fetching with SSRF guard.",
+      "blocking_for": "G02",
+      "user_action_required": "Push the file to the repository OR send explicit waiver text."
+    },
+    {
+      "id": "D-02",
+      "description": "Choose a production identity provider (OIDC, OAuth2, internal SSO) — current production adapter fails closed without it.",
+      "blocking_for": "G02+ (production deployment only)",
+      "user_action_required": "Decide before production deployment; not blocking for development."
+    },
+    {
+      "id": "D-03",
+      "description": "Choose a license for the repository (no LICENSE file present).",
+      "blocking_for": "Public release",
+      "user_action_required": "Pick a license; README.md currently says 'Proprietary — internal use only'."
+    }
+  ],
+  "file_count_before": 0,
+  "file_count_after": 86,
+  "loc_source": 2926,
+  "loc_tests": 1678,
+  "loc_total_python": 4604,
+  "test_counts": {
+    "collected": 140,
+    "passed": 140,
+    "failed": 0,
+    "skipped": 0,
+    "coverage_percent": 90
+  },
+  "lint_exclusions": [
+    {"rule": "E501",   "scope": "project", "justification": "Line length enforced by ruff format (line-length=100)."},
+    {"rule": "B008",   "scope": "project", "justification": "FastAPI Depends()/Query() in defaults is the framework's intended pattern."},
+    {"rule": "SIM102", "scope": "project", "justification": "Nested ifs are sometimes clearer in domain validators with different error messages."},
+    {"rule": "SIM117", "scope": "project", "justification": "Nested withs in tests are clearer than chained commas."},
+    {"rule": "UP042",  "scope": "project", "justification": "Migration to enum.StrEnum would change Pydantic v2 serialization behavior; deferred to a future group."},
+    {"rule": "UP046",  "scope": "project", "justification": "Migration to PEP 695 type parameters requires careful audit; deferred to a future group."},
+    {"rule": "B011",   "scope": "tests/**", "justification": "Tests legitimately use assert False in some cases."},
+    {"rule": "S101",   "scope": "tests/**", "justification": "Tests use assert as their primary assertion mechanism."},
+    {"rules": ["E","W","F"], "scope": "alembic/**", "justification": "Alembic-generated migration files follow their own style; lint noise would obscure real issues."}
+  ],
+  "security_findings": {
+    "auth_tests_pass": true,
+    "ssrf_tests_pass": true,
+    "cors_wildcard_with_credentials_blocked": true,
+    "production_fails_closed_without_provider": true,
+    "secret_redaction_in_logs_verified": true,
+    "no_secrets_in_commits": true,
+    "unsupported_endpoints_return_501": true
+  },
+  "adrs": [
+    "0001-modular-monolith",
+    "0002-sqlite-test-dialect",
+    "0003-local-dev-auth-fail-closed",
+    "0004-ssrf-denylist",
+    "0005-domain-pydantic-v2",
+    "0006-api-first-contract"
+  ],
+  "toolkit_status": {
+    "TOOLKIT_INDEX_present": false,
+    "audit_performed": true,
+    "audit_evidence": "docs/baseline.md §2",
+    "blocking_for": "G02",
+    "not_blocking_for": "G01"
+  },
+  "next_group_authorized": false,
+  "explicit_stop": true,
+  "stop_reason": "Awaiting explicit user authorization before GROUP_02 per START_HERE_GLM.md §1."
+}

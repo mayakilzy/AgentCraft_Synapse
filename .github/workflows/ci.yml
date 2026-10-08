@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Format check (ruff)
+        run: ruff format --check src tests
+
+      - name: Run migrations up
+        env:
+          SYNAPSE_ENV: test
+          SYNAPSE_DB_URL: sqlite+aiosqlite:///./ci-synapse.db
+          SYNAPSE_AUTH_MODE: development
+          SYNAPSE_CORS_ORIGINS: http://localhost:3000
+          SYNAPSE_CORS_ALLOW_CREDENTIALS: 'true'
+        run: python -m alembic upgrade head
+
+      - name: Run migrations down (verify rollback)
+        env:
+          SYNAPSE_ENV: test
+          SYNAPSE_DB_URL: sqlite+aiosqlite:///./ci-synapse.db
+          SYNAPSE_AUTH_MODE: development
+          SYNAPSE_CORS_ORIGINS: http://localhost:3000
+          SYNAPSE_CORS_ALLOW_CREDENTIALS: 'true'
+        run: python -m alembic downgrade base
+
+      - name: OpenAPI check
+        env:
+          SYNAPSE_ENV: test
+          SYNAPSE_DB_URL: sqlite+aiosqlite:///:memory:
+          SYNAPSE_AUTH_MODE: development
+          SYNAPSE_CORS_ORIGINS: http://localhost:3000
+          SYNAPSE_CORS_ALLOW_CREDENTIALS: 'true'
+        run: |
+          python -c "import json; \
+            from synapse.main import create_app; \
+            schema = create_app().openapi(); \
+            assert schema['openapi'].startswith('3.'); \
+            print('OpenAPI OK, version:', schema['openapi'])"
+
+      - name: Run tests
+        env:
+          SYNAPSE_ENV: test
+          SYNAPSE_DB_URL: sqlite+aiosqlite:///:memory:
+          SYNAPSE_AUTH_MODE: development
+          SYNAPSE_DEV_API_KEYS: ci-test-key
+          SYNAPSE_ADMIN_API_KEYS: ci-admin-key
+          SYNAPSE_CORS_ORIGINS: http://localhost:3000
+          SYNAPSE_CORS_ALLOW_CREDENTIALS: 'true'
+        run: pytest -q
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: |
+            reports/coverage.xml
+            reports/coverage_html/

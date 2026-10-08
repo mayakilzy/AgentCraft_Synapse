@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.pytest_cache
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Distribution
+*.whl
+*.tar.gz
+
+# Local environment / secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets/
+
+# Database / runtime
+*.sqlite
+*.sqlite3
+*.db
+synapse.db
+synapse_test.db
+
+# Reports / artifacts (regenerated each run, do not commit binaries)
+reports/coverage.xml
+reports/coverage_html/
+reports/*.log
+
+# OS
+Thumbs.db
+.DS_Store

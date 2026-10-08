@@ -9,7 +9,7 @@
 | Synapse repository | `https://github.com/mayakilzy/AgentCraft_Synapse.git` |
 | Branch | `main` |
 | Base SHA | `7e6e333` (HEAD of G02 slice + backfill) |
-| Final SHA | _set after this commit_ |
+| Final SHA | `b2cc8d0`  |
 | Slice commit under review | `999f4a0` (G02 minimal vertical slice) |
 | Authorization | User's "G02 Slice Final Qualification" message |
 
@@ -347,8 +347,8 @@ hoisting — no behavior change).
 |-------|-------|
 | Branch | `main` |
 | Base SHA | `7e6e333` |
-| Final SHA | _set after this commit_ |
-| Pushed to `origin/main` | _pending commit_ |
+| Final SHA | `b2cc8d0`  |
+| Pushed to `origin/main` | yes  |
 
 ## STOP statement
 

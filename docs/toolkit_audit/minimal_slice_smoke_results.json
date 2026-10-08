@@ -1,0 +1,84 @@
+{
+  "audit_version": "1.0",
+  "schema_version": "2.0",
+  "generated_at": "2026-10-08T16:24:40.393542+00:00",
+  "purpose": "Minimal first vertical slice \u2014 real functional smoke tests per ADR-0009 \u00a72",
+  "records": [
+    {
+      "tool_name": "arxiv_search_tool",
+      "test_kind": "network_public",
+      "test_description": "Live arXiv API query for 'transformers attention', max 2 results",
+      "command": "from tool import ArxivSearchTool; t.run(query='transformers attention', max_results=2)",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 got 2 results, first: arxiv_id=2303.15105 title=Vision Transformer with Quadrangle Attention...",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.236079+00:00"
+    },
+    {
+      "tool_name": "url_safety_tool",
+      "test_kind": "offline_safe",
+      "test_description": "URL validation against metadata IP, loopback, public",
+      "command": "from tool import UrlSafetyTool; t.run(url='http://169.254.169.254/...')",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 meta IP blocked=True, loopback blocked=True, public allowed=True",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.417543+00:00"
+    },
+    {
+      "tool_name": "synapse.security.ssrf (existing in Synapse G01)",
+      "test_kind": "offline_safe",
+      "test_description": "Verify Synapse's existing SSRF guard blocks meta IP / loopback",
+      "command": "from synapse.security.ssrf import validate_url; validate_url('http://169.254.169.254/...')",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 meta IP blocked=True, loopback blocked=True, file:// blocked=True",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.447185+00:00"
+    },
+    {
+      "tool_name": "trafilatura (pip-installed, used via thin Synapse wrapper)",
+      "test_kind": "offline_safe",
+      "test_description": "Extract article text + metadata from fixture HTML using trafilatura.extract()",
+      "command": "import trafilatura; trafilatura.extract(html, with_metadata=True, output_format='json')",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 extracted text (276 chars); title='Transformer Architecture Explained'; author='Jane Researcher'; date='2017-01-01'",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.580647+00:00"
+    },
+    {
+      "tool_name": "feedparser (pip-installed, used via thin Synapse wrapper)",
+      "test_kind": "offline_safe",
+      "test_description": "Parse a fixture RSS feed using feedparser.parse()",
+      "command": "import feedparser; feedparser.parse(rss_xml)",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 feed title='arXiv cs.AI'; entry title='Sample Paper on Transformers'; link='https://arxiv.org/abs/2401.00001'; author='Author One'",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.747080+00:00"
+    },
+    {
+      "tool_name": "bibtexparser (pip-installed, used via thin Synapse wrapper)",
+      "test_kind": "offline_safe",
+      "test_description": "Parse a fixture BibTeX entry",
+      "command": "import bibtexparser; bibtexparser.parse(bibtex_str)",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 parsed 1 entry/entries; first key='vaswani2017attention'; title='Attention Is All You Need'",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.955051+00:00"
+    },
+    {
+      "tool_name": "agentcraft_toolkit.scraping.delta_hash",
+      "test_kind": "offline_safe",
+      "test_description": "Compute deterministic content hash for fixture content",
+      "command": "from agentcraft_toolkit.scraping.delta_hash import <fn>; <fn>('hello world')",
+      "exit_code": 0,
+      "stdout_truncated": "OK \u2014 fn='fingerprint'; hash=5eb63bbbe01eeed093cb22bb8f5acdc3... (deterministic: True)",
+      "stderr_truncated": null,
+      "tested_at": "2026-10-08T16:24:39.964229+00:00"
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "skipped": 0
+  }
+}

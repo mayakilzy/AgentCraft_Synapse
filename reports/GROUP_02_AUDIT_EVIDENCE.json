@@ -2,7 +2,8 @@
   "audit_mission": "G02 Direct Toolkit Audit Mission v2.1",
   "audit_mission_version": "2.1",
   "audit_date": "2026-10-08T15:55:00Z",
-  "status": "PASS",
+  "status": "CONDITIONALLY_ACCEPTED_AS_INVENTORY_AUDIT",
+  "status_correction_2026_10_08": "Per ADR-0009 §2: the original 'PASS' status overstated capability coverage. The audit is conditionally accepted as an INVENTORY AND DISCOVERY AUDIT, NOT as production provider approval. Functional coverage was 2/32 smoke tests passing (not 0 capability gaps). See G02_MINIMAL_EXECUTION_PROPOSAL.md for the corrected gap analysis.",
   "synapse_repository": {
     "url": "https://github.com/mayakilzy/AgentCraft_Synapse.git",
     "branch": "main",
@@ -28,12 +29,21 @@
   },
   "audit_authorization": {
     "source": "User's G02 Direct Toolkit Audit Mission v2.1 message",
-    "read_only_enforcement": "technical isolation (pushurl disabled, credential.helper empty)",
-    "push_blocked": true,
+    "credential_scope": "write-capable (repo + workflow OAuth scopes — verified via x-oauth-scopes header)",
+    "credential_level_read_only": false,
+    "process_level_mitigations_applied": [
+      "remote.origin.url stripped of token (set to plain https URL after one-shot clone)",
+      "remote.origin.pushurl = DISABLED-PUSH-BY-AUDIT-POLICY (push from local clone returns exit 128)",
+      "credential.helper = '' (no auto-fill from system keychain)",
+      "audit scripts never invoke write-capable GitHub API endpoints"
+    ],
     "push_blocker_evidence": "git push --dry-run returned exit 128 with 'fatal: DISABLED-PUSH-BY-AUDIT-POLICY does not appear to be a git repository'",
+    "residual_risk": "The credential is write-capable at the token level. Process-level mitigations on the local clone do NOT change the credential's capabilities. Any agent or human with access to the token file (/home/z/my-project/.secure/agentcraft_token.env, chmod 600) can still push to user's repositories via direct GitHub API calls.",
+    "required_future_action": "Future Toolkit audits MUST use a repository-scoped fine-grained PAT with Contents:Read only on the specific repo, OR an independently enforced read-only access boundary (e.g., a mirror clone). See CORRECTED_CREDENTIAL_STATEMENT.md and ADR-0009 §7.",
     "token_in_committed_files": false,
     "token_in_logs": false,
-    "write_capable_github_api_calls": 0
+    "write_capable_github_api_calls": 0,
+    "correction_issued": "2026-10-08 per ADR-0009 §7 — see docs/toolkit_audit/CORRECTED_CREDENTIAL_STATEMENT.md"
   },
   "tasks": [
     {
@@ -235,12 +245,52 @@
     "production_code_modified": false,
     "files_added_under_src_synapse": 0,
     "files_added_under_tests": 0,
-    "files_added_under_scripts": 2,
-    "files_added_under_docs_toolkit_audit": 4,
+    "files_added_under_scripts": 3,
+    "files_added_under_docs_toolkit_audit": 7,
     "files_added_under_reports": 2,
     "verification_test": "tests/integration/test_toolkit_audit_preparation.py::test_no_g02_implementation_code_added"
   },
+  "minimal_slice_smoke_results": {
+    "description": "Per ADR-0009 §2-§3: real functional smoke tests for the minimal first vertical slice providers (run after the audit, in the audit env). 7/7 passed.",
+    "results_file": "docs/toolkit_audit/minimal_slice_smoke_results.json",
+    "script": "scripts/run_minimal_slice_smoke.py",
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "skipped": 0,
+    "providers_verified_functionally": [
+      "arxiv_search_tool (vendored adapter, MIT, stdlib-only)",
+      "url_safety_tool (vendored adapter, MIT, stdlib-only)",
+      "synapse.security.ssrf (existing G01, MIT)",
+      "trafilatura (pip-installed 2.3.1, Apache-2.0, used via thin Synapse wrapper)",
+      "feedparser (pip-installed 6.0.14, BSD-2-Clause — bonus test, NOT in minimal slice)",
+      "bibtexparser (pip-installed 2.1.0, MIT — bonus test, NOT in minimal slice)",
+      "agentcraft_toolkit.scraping.delta_hash.fingerprint() (vendored function, MIT, stdlib-only)"
+    ]
+  },
+  "adr_0009_clarifications_applied": {
+    "1_preserve_audit_evidence_and_toolkit_sha": true,
+    "2_separate_inventory_from_functional_coverage": true,
+    "3_minimal_first_vertical_slice_proposed": true,
+    "4_integration_approaches_compared": true,
+    "5_do_not_install_all_15_providers": true,
+    "6_defer_instaloader_social_browser_runtimes": true,
+    "7_credential_correctly_characterized_as_write_capable": true,
+    "8_no_toolkit_modification_or_upstream_push": true,
+    "toolkit_commit_sha_frozen_at": "fd9df34c51781bd12effab62762022ab04dbd771",
+    "minimal_execution_proposal": "docs/toolkit_audit/G02_MINIMAL_EXECUTION_PROPOSAL.md",
+    "corrected_credential_statement": "docs/toolkit_audit/CORRECTED_CREDENTIAL_STATEMENT.md",
+    "upstream_repair_requests_file": "docs/toolkit_audit/UPSTREAM_REPAIR_REQUESTS.md (empty — no upstream repairs needed)",
+    "decisions_required_updated": [
+      "D-04: instaloader GPL review — deferred per ADR-0009 §6",
+      "D-05: social/scientific credentials — deferred per ADR-0009 §6",
+      "D-06: browser runtimes — deferred per ADR-0009 §6",
+      "D-07: confirm minimal 3-provider set is sufficient (replaces original 15-provider set)",
+      "D-08: approve G02_MINIMAL_EXECUTION_PROPOSAL.md as the implementation gate",
+      "D-09: provision repository-scoped fine-grained PAT for future Toolkit audits (per ADR-0009 §7)"
+    ]
+  },
   "explicit_stop": true,
-  "stop_reason": "Awaiting explicit user approval per G02 Direct Toolkit Audit Mission v2.1 §10. The agent will NOT begin G02 production implementation, will NOT import/copy Toolkit source code into Synapse, and will NOT begin GROUP_03 until the user explicitly approves D-07 and D-08.",
+  "stop_reason": "Awaiting explicit user approval per ADR-0009 §3 and the user's 'G02 Audit Review & Minimal Implementation Gate' message. The agent will NOT begin production implementation until the user approves the G02_MINIMAL_EXECUTION_PROPOSAL.md (D-08).",
   "next_group_authorized": false
 }

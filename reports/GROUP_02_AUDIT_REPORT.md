@@ -1,5 +1,37 @@
 # GROUP_02_AUDIT_REPORT — Direct Toolkit Audit (Mission v2.1)
 
+> **CORRECTION ADDENDUM (2026-10-08, per ADR-0009)**:
+>
+> This report's original wording overstated the audit's scope and
+> the credential's protection level. The corrections are:
+>
+> 1. **Audit status**: This is an **inventory and discovery audit**,
+>    NOT production provider approval. The original "PASS" status is
+>    amended to "CONDITIONALLY ACCEPTED AS INVENTORY AUDIT".
+> 2. **Capability gaps**: The original "0 capability gaps" claim
+>    conflated inventory coverage (32 tools imported) with functional
+>    coverage (only 2 tools smoke-tested). Per ADR-0009 §2, 6 of 8
+>    capability domains had inventory coverage but NOT functional
+>    coverage at audit time. The minimal slice smoke tests
+>    (`docs/toolkit_audit/minimal_slice_smoke_results.json`) bring 4
+>    of 8 domains to functional coverage.
+> 3. **Credential**: The local git push block (`remote.origin.pushurl
+>    = DISABLED-PUSH-BY-AUDIT-POLICY`) is a **process-level guard on
+>    the local clone**, NOT a credential-level read-only enforcement.
+>    The credential itself is write-capable (repo + workflow OAuth
+>    scopes). See `docs/toolkit_audit/CORRECTED_CREDENTIAL_STATEMENT.md`
+>    and ADR-0009 §7.
+> 4. **Provider count**: The original "15 high-priority providers"
+>    recommendation is superseded by the minimal 3-provider set in
+>    `docs/toolkit_audit/G02_MINIMAL_EXECUTION_PROPOSAL.md`.
+> 5. **Implementation gate**: Production implementation is NOT
+>    authorized by this audit. The user must explicitly approve
+>    `G02_MINIMAL_EXECUTION_PROPOSAL.md` (decision D-08) before any
+>    code under `src/synapse/` is added.
+>
+> The body of this report is preserved unchanged as historical
+> evidence. The corrections above are binding.
+
 ## Header
 
 | Field | Value |

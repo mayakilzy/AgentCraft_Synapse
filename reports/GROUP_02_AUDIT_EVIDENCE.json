@@ -1,0 +1,246 @@
+{
+  "audit_mission": "G02 Direct Toolkit Audit Mission v2.1",
+  "audit_mission_version": "2.1",
+  "audit_date": "2026-10-08T15:55:00Z",
+  "status": "PASS",
+  "synapse_repository": {
+    "url": "https://github.com/mayakilzy/AgentCraft_Synapse.git",
+    "branch": "main",
+    "base_commit": "d03f176",
+    "final_commit": "pending — set after this commit",
+    "clean_tree": true,
+    "pushed_to_origin": "pending"
+  },
+  "toolkit_repository": {
+    "url": "https://github.com/mayakilzy/AgentCraft-Toolkit.git",
+    "branch": "main",
+    "commit_sha": "fd9df34c51781bd12effab62762022ab04dbd771",
+    "commit_date": "2026-09-01T10:20:51+00:00",
+    "upstream_source_repo": "https://github.com/NousResearch/hermes-agent",
+    "upstream_license": "MIT",
+    "upstream_copyright": "(c) 2025 Nous Research",
+    "toolkit_adapted": true,
+    "toolkit_tool_count": 341,
+    "toolkit_category_count": 26,
+    "library_pip_package": "agentcraft-toolkit",
+    "library_pip_version": "0.1.0",
+    "library_module_count": 158
+  },
+  "audit_authorization": {
+    "source": "User's G02 Direct Toolkit Audit Mission v2.1 message",
+    "read_only_enforcement": "technical isolation (pushurl disabled, credential.helper empty)",
+    "push_blocked": true,
+    "push_blocker_evidence": "git push --dry-run returned exit 128 with 'fatal: DISABLED-PUSH-BY-AUDIT-POLICY does not appear to be a git repository'",
+    "token_in_committed_files": false,
+    "token_in_logs": false,
+    "write_capable_github_api_calls": 0
+  },
+  "tasks": [
+    {
+      "id": "G02-A01",
+      "title": "Repository Discovery",
+      "status": "PASS",
+      "toolkit_root_readme_read": true,
+      "toolkit_root_readme_lines": 1099,
+      "subordinate_readmes_inspected": ["McpKit/README.md", "PromptKit/README.md"],
+      "shortlisted_tools": 32,
+      "artifact": "docs/toolkit_audit/TOOLKIT_REPOSITORY_INVENTORY.json"
+    },
+    {
+      "id": "G02-A02",
+      "title": "Capability Analysis",
+      "status": "PASS",
+      "capability_domains_covered": 8,
+      "capability_gaps": 0,
+      "provenance_assessed": true,
+      "artifact": "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.md"
+    },
+    {
+      "id": "G02-A03",
+      "title": "Tiered Verification",
+      "status": "PASS",
+      "stage_1_package_available": 32,
+      "stage_2_import_succeeded": 32,
+      "stage_3_functional_smoke_passed": 2,
+      "stage_3_skipped_with_reason": 30,
+      "stage_4_production_ready": 0,
+      "stage_4_not_assessed": 32,
+      "artifact": "docs/toolkit_audit/verification_results.json + smoke_results.json"
+    },
+    {
+      "id": "G02-A04",
+      "title": "Provider Selection",
+      "status": "PASS",
+      "high_priority_providers_recommended": 15,
+      "medium_priority_providers_recommended": 7,
+      "deferred_providers": 8,
+      "license_flagged_providers": 1,
+      "rejected_providers": 0,
+      "artifact": "docs/toolkit_audit/PROVIDER_SELECTION.md"
+    },
+    {
+      "id": "G02-A05",
+      "title": "Integration Design",
+      "status": "PASS",
+      "integration_pattern": "selective vendored adapter (NOT pip install, NOT runtime dependency)",
+      "toolkit_runtime_dependency": false,
+      "synapse_security_wraps_toolkit": true,
+      "artifact": "docs/toolkit_audit/TOOLKIT_INTEGRATION_MAP.md"
+    },
+    {
+      "id": "G02-A06",
+      "title": "Deliverables",
+      "status": "PASS",
+      "deliverables": [
+        "docs/toolkit_audit/TOOLKIT_REPOSITORY_INVENTORY.json",
+        "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.json",
+        "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.md",
+        "docs/toolkit_audit/PROVIDER_SELECTION.md",
+        "docs/toolkit_audit/TOOLKIT_INTEGRATION_MAP.md",
+        "reports/GROUP_02_AUDIT_REPORT.md",
+        "reports/GROUP_02_AUDIT_EVIDENCE.json"
+      ]
+    }
+  ],
+  "commands": [
+    {"command": "git clone https://...@github.com/mayakilzy/AgentCraft-Toolkit.git toolkit", "exit_code": 0, "note": "one-shot authenticated clone"},
+    {"command": "git remote set-url origin https://github.com/mayakilzy/AgentCraft-Toolkit.git", "exit_code": 0, "note": "credentials stripped from URL"},
+    {"command": "git remote set-url --push origin DISABLED-PUSH-BY-AUDIT-POLICY", "exit_code": 0, "note": "push disabled"},
+    {"command": "git config credential.helper ''", "exit_code": 0},
+    {"command": "git push --dry-run", "exit_code": 128, "note": "correctly blocked: 'fatal: DISABLED-PUSH-BY-AUDIT-POLICY does not appear to be a git repository'"},
+    {"command": "git log -1 --format=%H (Toolkit)", "exit_code": 0, "output": "fd9df34c51781bd12effab62762022ab04dbd771"},
+    {"command": "python3 scripts/run_g02_audit.py", "exit_code": 0, "note": "32/32 imports succeeded, 2/32 smoke passed"},
+    {"command": "python3 scripts/generate_g02_matrix.py", "exit_code": 0, "note": "matrix JSON written, schema v2.0"},
+    {"command": "ruff check src tests scripts", "exit_code": 0},
+    {"command": "ruff format --check src tests scripts", "exit_code": 0},
+    {"command": "python3 -m pytest", "exit_code": 0, "passed": 162, "failed": 0, "skipped": 0, "note": "coverage 90%"}
+  ],
+  "test_counts": {
+    "collected": 162,
+    "passed": 162,
+    "failed": 0,
+    "skipped": 0,
+    "coverage_percent": 90,
+    "breakdown": {
+      "tests/unit/domain/": 71,
+      "tests/unit/security/": 24,
+      "tests/unit/api/": 34,
+      "tests/integration/": 33
+    }
+  },
+  "audit_smoke_results": {
+    "total_shortlisted": 32,
+    "smoke_passed": 2,
+    "smoke_failed": 0,
+    "smoke_skipped": 30,
+    "passing_tools": [
+      {
+        "tool_name": "arxiv_search_tool",
+        "test": "Live arXiv API query for 'transformers attention', max 2 results",
+        "result": "got 2 results, first title: Vision Transformer with Quadrangle Attention",
+        "exit_code": 0
+      },
+      {
+        "tool_name": "url_safety_tool",
+        "test": "URL validation: metadata IP / loopback / public",
+        "result": "meta IP blocked=True, loopback blocked=True, public allowed=True",
+        "exit_code": 0
+      }
+    ],
+    "skipped_reasons_summary": {
+      "runtime_not_configured": 11,
+      "no_safe_smoke_test_defined": 13,
+      "credentials_unavailable": 4,
+      "side_effects_unsafe": 1,
+      "license_review_required": 1
+    }
+  },
+  "matrix_summary": {
+    "total_tools": 32,
+    "indexed_only": 0,
+    "package_available_only": 0,
+    "import_only": 14,
+    "functional_smoke_passed": 1,
+    "production_ready": 0,
+    "flagged_for_legal_review": 2,
+    "deferred": 15,
+    "rejected": 0,
+    "adopted": 0,
+    "capability_gaps": 0,
+    "schema_version": "2.0"
+  },
+  "license_findings": {
+    "auto_rejected": 0,
+    "flagged_for_legal_review": 1,
+    "flagged_tool": {
+      "tool_name": "instaloader_tool",
+      "license": "GPL-3.0",
+      "review_reason": "GPL — copyleft; linking may trigger source-disclosure obligations",
+      "recommended_integration_pattern": "subprocess isolation (avoid derivative-work status)",
+      "disposition": "flagged_for_legal_review"
+    },
+    "license_clean_count": 31
+  },
+  "provenance_preservation_summary": {
+    "high_provenance_tools": 18,
+    "medium_provenance_tools": 14,
+    "low_or_unknown": 0,
+    "all_assessed": true,
+    "fields_assessed": [
+      "source_structure_preserved",
+      "metadata_preserved",
+      "links_preserved",
+      "citations_preserved",
+      "version_preserved"
+    ]
+  },
+  "decisions_required": [
+    {
+      "id": "D-04",
+      "description": "Approve instaloader_tool (GPL-3.0) legal review OR confirm subprocess-isolation integration",
+      "blocking_for": "G02 social ingestion via Instagram"
+    },
+    {
+      "id": "D-05",
+      "description": "Approve credentials provisioning for LLM/authenticated APIs (twikit, scholarly, cloudscraper)",
+      "blocking_for": "G02 social/scientific ingestion requiring auth"
+    },
+    {
+      "id": "D-06",
+      "description": "Approve runtime binaries installation (Playwright browsers, ChromeDriver, curl_cffi native)",
+      "blocking_for": "G02 browser automation and JS-rendered crawling"
+    },
+    {
+      "id": "D-07",
+      "description": "Confirm the 15 high-priority provider set is sufficient",
+      "blocking_for": "G02 implementation begin"
+    },
+    {
+      "id": "D-08",
+      "description": "Approve this audit report + provider selection + integration map",
+      "blocking_for": "G02 implementation begin"
+    }
+  ],
+  "known_limitations": [
+    {"id": "L-14", "description": "Only 2/32 tools have functional smoke tests passing", "severity": "Medium"},
+    {"id": "L-15", "description": "11 tools skipped due to missing runtime binaries", "severity": "Medium"},
+    {"id": "L-16", "description": "4 tools skipped due to missing credentials", "severity": "Medium"},
+    {"id": "L-17", "description": "1 tool (instaloader) is GPL-3.0 — flagged for legal review", "severity": "High for Instagram ingestion"},
+    {"id": "L-18", "description": "Production-readiness (Stage 4) is null for all 32 tools", "severity": "Expected"},
+    {"id": "L-19", "description": "Audit environment lacks trafilatura, feedparser, waybackpy pip packages", "severity": "Low"},
+    {"id": "L-20", "description": "Provenance preservation assessment is documentation-based, not runtime-verified", "severity": "Medium"}
+  ],
+  "synapse_regression": {
+    "all_g01_tests_pass": true,
+    "production_code_modified": false,
+    "files_added_under_src_synapse": 0,
+    "files_added_under_tests": 0,
+    "files_added_under_scripts": 2,
+    "files_added_under_docs_toolkit_audit": 4,
+    "files_added_under_reports": 2,
+    "verification_test": "tests/integration/test_toolkit_audit_preparation.py::test_no_g02_implementation_code_added"
+  },
+  "explicit_stop": true,
+  "stop_reason": "Awaiting explicit user approval per G02 Direct Toolkit Audit Mission v2.1 §10. The agent will NOT begin G02 production implementation, will NOT import/copy Toolkit source code into Synapse, and will NOT begin GROUP_03 until the user explicitly approves D-07 and D-08.",
+  "next_group_authorized": false
+}

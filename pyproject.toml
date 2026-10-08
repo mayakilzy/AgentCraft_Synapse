@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.4,<1.0",
     "httpx>=0.27,<1.0",
     "aiosqlite>=0.20,<1.0",
+    "jsonschema>=4.20,<5.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -41,7 +42,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["alembic/versions"]
+extend-exclude = ["alembic/versions", "docs/toolkit_audit"]
 
 [tool.ruff.lint]
 select = [
@@ -93,6 +94,7 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning:pydantic.*",
     "ignore::DeprecationWarning:pytest.*",
+    "ignore::DeprecationWarning:jsonschema.*",
 ]
 
 [tool.coverage.run]

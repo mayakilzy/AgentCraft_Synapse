@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentcraft-synapse.local/schemas/toolkit_index.schema.json",
+  "title": "AgentCraft Toolkit Index",
+  "description": "Schema for validating TOOLKIT_INDEX(1).json before the G02 audit consumes it. Per START_HERE_GLM.md §6: 'The index is discovery evidence, not proof of runtime fitness.' This schema only validates STRUCTURE — runtime fitness is verified separately by scripts/verify_tool_imports.py.",
+  "type": "object",
+  "required": ["version", "generated_at", "categories"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Inventory version (e.g. '1.0').",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO8601 timestamp when the inventory was generated."
+    },
+    "source": {
+      "type": "string",
+      "description": "Optional: where the inventory came from (path / URL)."
+    },
+    "categories": {
+      "type": "object",
+      "description": "Map of category name → list of tools in that category.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["tools"],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Optional human-readable description of the category."
+          },
+          "tools": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/tool"}
+          }
+        }
+      },
+      "minProperties": 1
+    },
+    "total_tools": {
+      "type": "integer",
+      "description": "Optional: total count of tools across all categories.",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Canonical tool name (import name or pip package).",
+          "minLength": 1
+        },
+        "version": {
+          "type": ["string", "null"],
+          "description": "Declared version (may differ from installed version — audit verifies)."
+        },
+        "category": {
+          "type": "string",
+          "description": "Capability domain: discovery | acquisition | crawling | browser | extraction | scientific | social | provenance | other."
+        },
+        "description": {
+          "type": ["string", "null"]
+        },
+        "license": {
+          "type": ["string", "null"],
+          "description": "SPDX identifier or human-readable license."
+        },
+        "homepage": {
+          "type": ["string", "null"],
+          "format": "uri"
+        },
+        "pypi": {
+          "type": ["string", "null"],
+          "description": "PyPI package name if installed via pip."
+        },
+        "repository": {
+          "type": ["string", "null"],
+          "format": "uri"
+        },
+        "supported_sources": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Source types this tool supports (web, arxiv, github, rss, etc.)."
+        },
+        "notes": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

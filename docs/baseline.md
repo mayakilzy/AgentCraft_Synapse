@@ -2,6 +2,11 @@
 
 > Captured read-only reconnaissance of the repository before any G01 work.
 > This file is generated and committed once at the start of G01-T01.
+>
+> **Update 2026-10-08 (post-G01 conditional acceptance):** G01 was
+> conditionally accepted by the user (see ADR-0007). Decisions D-01,
+> D-02, D-03 are recorded there. This baseline file remains accurate as
+> a historical record of the pre-G01 repository state.
 
 ## 1. Repository identity
 

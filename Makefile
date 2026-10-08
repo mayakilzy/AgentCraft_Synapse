@@ -6,7 +6,7 @@ PIP ?= pip
 COVERAGE_THRESHOLD ?= 70
 
 .PHONY: help install lint format test test-fast migrate-up migrate-down \
-        openapi-check smoke clean
+	openapi-check smoke clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -44,6 +44,39 @@ openapi-check:  ## Validate OpenAPI schema is well-formed
 	  print(json.dumps(schema, indent=2)[:200]); \
 	  assert schema['openapi'].startswith('3.'), 'OpenAPI version mismatch'; \
 	  print('OpenAPI OK')"
+
+# ── G02 Audit Preparation ────────────────────────────────────────────────────
+# These targets are run AFTER the user provides TOOLKIT_INDEX(1).json.
+# Until then they exit with a friendly message.
+
+audit-validate:  ## Validate TOOLKIT_INDEX(1).json against schema
+	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
+	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
+	else \
+	  $(PYTHON) scripts/validate_toolkit_index.py "docs/toolkit_audit/TOOLKIT_INDEX(1).json"; \
+	fi
+
+audit-verify-imports:  ## Verify which indexed tools are actually importable
+	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
+	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
+	else \
+	  $(PYTHON) scripts/verify_tool_imports.py "docs/toolkit_audit/TOOLKIT_INDEX(1).json"; \
+	fi
+
+audit-generate-matrix:  ## Generate Layer-1 Capability Matrix from index + verification
+	@if [ ! -f "docs/toolkit_audit/TOOLKIT_INDEX(1).json" ]; then \
+	  echo "TOOLKIT_INDEX(1).json not yet provided — awaiting user (per ADR-0007 D-01)."; \
+	elif [ ! -f "docs/toolkit_audit/verification_results.json" ]; then \
+	  echo "Run 'make audit-verify-imports' first."; exit 1; \
+	else \
+	  $(PYTHON) scripts/generate_capability_matrix.py \
+	    "docs/toolkit_audit/TOOLKIT_INDEX(1).json" \
+	    "docs/toolkit_audit/verification_results.json" \
+	    --out-json "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.json" \
+	    --out-md   "docs/toolkit_audit/LAYER_1_CAPABILITY_MATRIX.md"; \
+	fi
+
+audit-all: audit-validate audit-verify-imports audit-generate-matrix  ## Full audit pipeline
 
 smoke:  ## Run smoke tests against a running service (uvicorn must be up)
 	$(PYTHON) -c "import httpx; r=httpx.get('http://127.0.0.1:8000/health/live'); \

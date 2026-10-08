@@ -49,9 +49,17 @@ def event_loop():
 
 @pytest.fixture(autouse=True)
 def _clear_settings_cache():
-    """Each test gets fresh settings (because we may mutate env)."""
-    from synapse.config import get_settings
+    """Each test gets fresh settings (because we may mutate env).
 
+    Skipped if the synapse package isn't importable (some audit-prep
+    tests don't need it).
+    """
+    try:
+        from synapse.config import get_settings
+    except ModuleNotFoundError:
+        # Not all tests need synapse (e.g. audit script tests).
+        yield
+        return
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

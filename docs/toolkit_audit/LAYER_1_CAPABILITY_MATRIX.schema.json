@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentcraft-synapse.local/schemas/layer1_capability_matrix.schema.json",
+  "title": "Layer-1 Capability Matrix",
+  "description": "Output schema for the G02 audit's Layer-1 Capability Matrix. Each row is one (capability_domain × tool) classification, with verification evidence attached when the tool is marked 'verified_runnable'.",
+  "type": "object",
+  "required": ["audit_version", "generated_at", "toolkit_index_source", "rows", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "audit_version": {
+      "type": "string",
+      "description": "Audit iteration identifier (e.g. '1.0')."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO8601 timestamp."
+    },
+    "toolkit_index_source": {
+      "type": "string",
+      "description": "Path or URL of TOOLKIT_INDEX(1).json used as input."
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/matrix_row"}
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total_tools", "indexed_only", "verified_runnable", "adopted", "deferred", "rejected", "gaps"],
+      "properties": {
+        "total_tools":        {"type": "integer", "minimum": 0},
+        "indexed_only":       {"type": "integer", "minimum": 0},
+        "verified_runnable":  {"type": "integer", "minimum": 0},
+        "adopted":            {"type": "integer", "minimum": 0},
+        "deferred":           {"type": "integer", "minimum": 0},
+        "rejected":           {"type": "integer", "minimum": 0},
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"},
+          "description": "Capability domains with no verified-runnable tool."
+        }
+      }
+    },
+    "decisions_required": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Open decisions for the user (e.g. paid API keys, ToS review)."
+    }
+  },
+  "$defs": {
+    "matrix_row": {
+      "type": "object",
+      "required": ["tool_name", "capability_domain", "classification", "evidence_provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_domain": {
+          "type": "string",
+          "enum": [
+            "discovery", "acquisition", "crawling", "browser",
+            "extraction", "scientific", "social", "provenance", "other"
+          ]
+        },
+        "classification": {
+          "type": "string",
+          "enum": ["indexed_only", "verified_runnable", "adopted", "deferred", "rejected"]
+        },
+        "evidence_provenance": {
+          "type": "string",
+          "description": "What evidence backs this classification."
+        },
+        "license": {
+          "type": ["string", "null"],
+          "description": "SPDX identifier or human-readable license."
+        },
+        "license_conflict": {
+          "type": "boolean",
+          "description": "True if license conflicts with proprietary distribution."
+        },
+        "version_declared": {"type": ["string", "null"]},
+        "version_installed": {"type": ["string", "null"]},
+        "import_command": {"type": ["string", "null"]},
+        "import_exit_code": {"type": ["integer", "null"]},
+        "test_count": {"type": ["integer", "null"]},
+        "supported_sources": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "failure_modes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "fallback": {
+          "type": ["string", "null"],
+          "description": "Recommended fallback if this tool fails."
+        },
+        "recommended_provider": {
+          "type": ["string", "null"],
+          "description": "Proposed Synapse provider adapter name (e.g. 'arxiv_search')."
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Other tools/packages this tool requires."
+        },
+        "operational_risks": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "notes": {"type": ["string", "null"]}
+      }
+    },
+    "gap": {
+      "type": "object",
+      "required": ["capability_domain", "reason", "recommended_remediation"],
+      "properties": {
+        "capability_domain": {
+          "type": "string",
+          "enum": [
+            "discovery", "acquisition", "crawling", "browser",
+            "extraction", "scientific", "social", "provenance", "other"
+          ]
+        },
+        "reason": {"type": "string"},
+        "recommended_remediation": {
+          "type": "string",
+          "enum": ["build_new", "find_alternative", "defer", "accept_gap"]
+        }
+      }
+    }
+  }
+}

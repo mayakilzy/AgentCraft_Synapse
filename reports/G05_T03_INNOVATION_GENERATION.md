@@ -33,7 +33,7 @@ business claims, no market novelty claims, no VERIFIED promotion.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `5210957b4da4c6bc43e009096de86825eacf7c86` |
-| Final commit SHA | (populated after push) |
+| Final commit SHA | `04edd23759f2c07e098756f417bae86bac9d5c74` |
 | Remote synchronization | PASS |
 | Working tree | CLEAN |
 
@@ -162,7 +162,7 @@ tests/integration/test_g05_t03_innovation_generation.py
 ## 8. Final SHA
 
 ```
-Final commit SHA (post-T03): <populated after push>
+Final commit SHA (post-T03): 04edd23759f2c07e098756f417bae86bac9d5c74
 Starting checkpoint (for reference): 5210957b4da4c6bc43e009096de86825eacf7c86
 ```
 

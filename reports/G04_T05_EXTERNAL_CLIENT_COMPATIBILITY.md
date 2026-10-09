@@ -51,7 +51,7 @@ changed.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `3217dd8cc8cf766e95c5a33c23d89a6286ab50cb` |
-| Final commit SHA | (populated after push) |
+| Final commit SHA | `5c98402a3fe55752e92f0a129aefd7964c219181` |
 | Remote synchronization | PASS (verified via `git ls-remote`) |
 | Working tree | CLEAN (in sync with origin/main) |
 
@@ -624,7 +624,7 @@ After implementing G04-T05 + 18 contract tests + external client
 example + this report:
 
 ```
-Final commit SHA (post-T05): <populated after push>
+Final commit SHA (post-T05): 5c98402a3fe55752e92f0a129aefd7964c219181
 Starting checkpoint (for reference): 3217dd8cc8cf766e95c5a33c23d89a6286ab50cb
 ```
 

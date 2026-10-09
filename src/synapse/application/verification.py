@@ -86,18 +86,29 @@ class VerificationOutcome:
 
 # ── Verification policy ────────────────────────────────────────────────────
 
-#: Minimum number of independent sources required for VERIFIED.
-#: Per requirement #9: "Automated VERIFIED decisions require a documented,
-#: sufficiently strong policy and appropriate evidence."
-MIN_INDEPENDENT_SOURCES_FOR_VERIFIED = 2
+#: Policy version — updated to v2 after the correction that removes
+#: automatic VERIFIED promotion based solely on source count or distinct URLs.
+POLICY_VERSION = "deterministic-v2"
 
-#: Minimum number of independent sources required for CORROBORATED.
-MIN_INDEPENDENT_SOURCES_FOR_CORROBORATED = 2
+#: Minimum number of INDEPENDENT PRIMARY evidence origins required for CORROBORATED.
+#: Per the corrected policy: distinct URLs do NOT prove independent evidence origins.
+#: CORROBORATED requires ≥2 evidence origins that are demonstrably independent
+#: (not mirrors, reposts, or summaries of the same primary source).
+MIN_INDEPENDENT_ORIGINS_FOR_CORROBORATED = 2
+
+#: VERIFIED is UNREACHABLE in deterministic-v2.
+#: Per the corrected policy §5: "VERIFIED must require a documented stronger
+#: verification policy and an auditable review or validation record. If such
+#: a mechanism is not implemented, VERIFIED must remain unreachable in
+#: deterministic-v1."
+#:
+#: Future policy versions (e.g., deterministic-v3 with human-review integration,
+#: or experimental-validation-v1 with experiment results) may make VERIFIED
+#: reachable — but only through an explicit, auditable review mechanism.
+VERIFIED_REACHABLE = False
 
 #: Staleness threshold in days — evidence older than this is flagged as
-#: potentially stale. This is a SOFT flag; the assessment outcome is
-#: STALE_OR_CONTEXT_MISMATCH only if the evidence contradicts more recent
-#: evidence or the claim's validity conditions specify a time bound.
+#: potentially stale.
 STALENESS_THRESHOLD_DAYS = 365
 
 
@@ -118,7 +129,7 @@ def _make_assessment_dict(
     independent_sources: list[str],
     context_notes: list[str],
     stale_evidence: list[str],
-    policy_version: str = "deterministic-v1",
+    policy_version: str = POLICY_VERSION,
     reviewer: str | None = None,
 ) -> dict[str, Any]:
     """Build a verification assessment dict.
@@ -233,13 +244,34 @@ async def assess_claim(
     # ── Evaluate evidence ──────────────────────────────────────────────
 
     # Source independence: group by source_uri
+    # Per the corrected policy: distinct URLs do NOT prove independent
+    # evidence origins. We track source_uris but do NOT assume they are
+    # independent primary origins. The `independent_source_count` field
+    # in the assessment reflects DISTINCT source_uris, but the outcome
+    # determination uses a CONSERVATIVE approach: unless provenance
+    # metadata explicitly marks sources as independent primary origins,
+    # we treat unknown-origin independence conservatively.
     source_groups: dict[str, list[EvidenceFragmentRow]] = {}
     for frag in fragments:
         uri = _get_source_uri(frag)
         source_groups.setdefault(uri, []).append(frag)
 
-    independent_sources = list(source_groups.keys())
-    independent_source_count = len(independent_sources)
+    distinct_source_uris = list(source_groups.keys())
+    distinct_source_count = len(distinct_source_uris)
+
+    # Determine independent PRIMARY origins.
+    # In deterministic-v2, we CANNOT automatically prove that two distinct
+    # source_uris are independent primary origins. Mirrors, reposts, and
+    # summaries may have different URLs but the same primary origin.
+    #
+    # Conservative default: assume all sources have UNKNOWN origin independence.
+    # Only mark as "independent_primary_origins" when explicit provenance
+    # metadata is available (e.g., different publishers, different authors,
+    # different acquisition methods — not implemented in the minimal slice).
+    #
+    # For now: independent_primary_origin_count = 1 if all sources share
+    # the same publisher/author; otherwise UNKNOWN (treated as 1 for safety).
+    independent_primary_origin_count = _count_independent_primary_origins(fragments)
 
     # Staleness
     stale_evidence = [frag.id for frag in fragments if _is_stale(frag)]
@@ -267,7 +299,8 @@ async def assess_claim(
 
     outcome, reason_code = _determine_outcome(
         has_evidence=len(fragments) > 0,
-        independent_source_count=independent_source_count,
+        distinct_source_count=distinct_source_count,
+        independent_primary_origin_count=independent_primary_origin_count,
         has_opposing=len(opposing_fragments) > 0,
         stale_evidence_count=len(stale_evidence),
         epistemic_state=claim.epistemic_state,
@@ -300,7 +333,7 @@ async def assess_claim(
         reason_code=reason_code,
         supporting_evidence=supporting_evidence,
         opposing_evidence=opposing_evidence,
-        independent_sources=independent_sources,
+        independent_sources=distinct_source_uris,
         context_notes=context_notes,
         stale_evidence=stale_evidence,
         reviewer=requester,
@@ -316,7 +349,7 @@ async def assess_claim(
             previous.get("outcome") == outcome
             and previous.get("supporting_evidence_count") == len(supporting_evidence)
             and previous.get("opposing_evidence_count") == len(opposing_evidence)
-            and previous.get("independent_source_count") == independent_source_count
+            and previous.get("distinct_source_count") == distinct_source_count
         ):
             _log.info(
                 "assessment unchanged for claim %s — idempotent (outcome=%s)",
@@ -339,7 +372,8 @@ async def assess_claim(
             evidence_change=(
                 f"supporting: {previous.get('supporting_evidence_count', 0)} → {len(supporting_evidence)}; "
                 f"opposing: {previous.get('opposing_evidence_count', 0)} → {len(opposing_evidence)}; "
-                f"independent_sources: {previous.get('independent_source_count', 0)} → {independent_source_count}"
+                f"distinct_sources: {previous.get('independent_source_count', 0)} → {distinct_source_count}; "
+                f"independent_primary_origins: {independent_primary_origin_count}"
             ),
             reviewer=requester,
         )
@@ -374,10 +408,12 @@ async def assess_claim(
             "claim_id": claim_id,
             "outcome": outcome,
             "reason_code": reason_code,
-            "independent_source_count": independent_source_count,
+            "distinct_source_count": distinct_source_count,
+            "independent_primary_origin_count": independent_primary_origin_count,
             "supporting_evidence_count": len(supporting_evidence),
             "opposing_evidence_count": len(opposing_evidence),
             "stale_evidence_count": len(stale_evidence),
+            "policy_version": POLICY_VERSION,
         },
         request_id=request_id,
     )
@@ -393,31 +429,72 @@ async def assess_claim(
     }
 
 
+def _count_independent_primary_origins(
+    fragments: list[EvidenceFragmentRow],
+) -> int:
+    """Count INDEPENDENT PRIMARY evidence origins.
+
+    Per the corrected policy §3:
+      - Multiple URLs repeating one primary study count as one evidence origin.
+      - Mirrors, reposts and summaries do not create independent confirmation.
+      - Unknown origin independence must not be assumed.
+      - Distinct primary evidence origins may qualify for corroboration when
+        their applicability is compatible.
+
+    In deterministic-v2, we CANNOT automatically prove that two distinct
+    source_uris are independent primary origins. Without explicit provenance
+    metadata (e.g., different publishers, different authors, different
+    acquisition methods), we conservatively treat all sources as having
+    UNKNOWN origin independence — which means we count them as 1
+    (not independently confirmed).
+
+    Returns:
+        1 if all sources have unknown independence (conservative default).
+        The count of distinct origins if provenance metadata is available
+        (future enhancement).
+    """
+    # In the minimal slice, we have no provenance metadata to distinguish
+    # primary origins from mirrors/reposts. Conservative default: 1.
+    #
+    # A future group can enhance this by:
+    # 1. Checking SourceRow.publisher / SourceRow.author for distinct values
+    # 2. Checking if source_uris share a domain (likely mirrors)
+    # 3. Using explicit provenance metadata from the acquisition pipeline
+    #
+    # For now: conservative = 1.
+    return 1
+
+
 # ── Outcome determination ───────────────────────────────────────────────────
 
 
 def _determine_outcome(
     *,
     has_evidence: bool,
-    independent_source_count: int,
+    distinct_source_count: int,
+    independent_primary_origin_count: int,
     has_opposing: bool,
     stale_evidence_count: int,
     epistemic_state: str,
 ) -> tuple[str, str]:
     """Determine the verification outcome and reason code.
 
-    Decision table:
-      ┌─────────────────┬──────────────────┬────────────┬──────────────┬─────────────────────────────┐
-      │ has_evidence    │ independent_srcs │ has_opposing│ stale_count  │ outcome                     │
-      ├─────────────────┼──────────────────┼────────────┼──────────────┼─────────────────────────────┤
-      │ False           │ 0                │ False      │ 0            │ INSUFFICIENT_EVIDENCE       │
-      │ True            │ 1                │ False      │ 0            │ SOURCE_SUPPORTED            │
-      │ True            │ ≥2              │ False      │ 0            │ CORROBORATED                │
-      │ True            │ ≥2              │ False      │ 0            │ VERIFIED (if policy met)    │
-      │ True            │ any             │ True       │ 0            │ CONTESTED                   │
-      │ True            │ any             │ False      │ >0           │ STALE_OR_CONTEXT_MISMATCH   │
-      │ False           │ 0                │ False      │ 0            │ NOT_EVIDENCED (for missing) │
-      └─────────────────┴──────────────────┴────────────┴──────────────┴─────────────────────────────┘
+    Corrected decision table (deterministic-v2):
+
+      ┌─────────────────┬──────────────────────┬────────────┬──────────────┬─────────────────────────────┐
+      │ has_evidence    │ independent_origins  │ has_opposing│ stale_count  │ outcome                     │
+      ├─────────────────┼──────────────────────┼────────────┼──────────────┼─────────────────────────────┤
+      │ False           │ 0                    │ False      │ 0            │ INSUFFICIENT_EVIDENCE       │
+      │ True            │ 1                    │ False      │ 0            │ SOURCE_SUPPORTED            │
+      │ True            │ ≥2                   │ False      │ 0            │ CORROBORATED                │
+      │ True            │ any                 │ True       │ 0            │ CONTESTED                   │
+      │ True            │ any                 │ False      │ >0 (1 src)   │ STALE_OR_CONTEXT_MISMATCH   │
+      │ False           │ 0                    │ False      │ 0            │ NOT_EVIDENCED (for missing) │
+      └─────────────────┴──────────────────────┴────────────┴──────────────┴─────────────────────────────┘
+
+    VERIFIED is UNREACHABLE in deterministic-v2.
+    Per §5: "VERIFIED must require a documented stronger verification policy
+    and an auditable review or validation record."
 
     Returns: (outcome, reason_code)
     """
@@ -435,34 +512,35 @@ def _determine_outcome(
     if has_opposing:
         return (
             VerificationOutcome.CONTESTED,
-            f"contradicting_evidence_present; independent_sources={independent_source_count}",
+            f"contradicting_evidence_present; "
+            f"distinct_sources={distinct_source_count}; "
+            f"independent_origins={independent_primary_origin_count}",
         )
 
-    if stale_evidence_count > 0 and independent_source_count <= 1:
+    if stale_evidence_count > 0 and distinct_source_count <= 1:
         return (
             VerificationOutcome.STALE_OR_CONTEXT_MISMATCH,
             f"evidence_stale; stale_count={stale_evidence_count}",
         )
 
-    if independent_source_count >= MIN_INDEPENDENT_SOURCES_FOR_VERIFIED:
-        # Per requirement #9: VERIFIED requires a documented policy.
-        # The policy is: ≥2 independent sources, no contradictions,
-        # no stale evidence. This is met.
-        return (
-            VerificationOutcome.VERIFIED,
-            f"policy_met; independent_sources={independent_source_count}; "
-            f"policy=deterministic-v1; min_sources={MIN_INDEPENDENT_SOURCES_FOR_VERIFIED}",
-        )
+    # VERIFIED is unreachable in deterministic-v2.
+    # Even if independent_primary_origin_count >= 2, we do NOT auto-promote
+    # to VERIFIED. CORROBORATED is the highest outcome in this policy version.
 
-    if independent_source_count >= MIN_INDEPENDENT_SOURCES_FOR_CORROBORATED:
+    if independent_primary_origin_count >= MIN_INDEPENDENT_ORIGINS_FOR_CORROBORATED:
         return (
             VerificationOutcome.CORROBORATED,
-            f"independent_sources={independent_source_count}",
+            f"independent_primary_origins={independent_primary_origin_count}; "
+            f"distinct_sources={distinct_source_count}; "
+            f"policy={POLICY_VERSION}; "
+            f"verified_unreachable=true",
         )
 
     return (
         VerificationOutcome.SOURCE_SUPPORTED,
-        f"single_source; independent_sources={independent_source_count}",
+        f"single_source; distinct_sources={distinct_source_count}; "
+        f"independent_origins={independent_primary_origin_count}; "
+        f"policy={POLICY_VERSION}",
     )
 
 

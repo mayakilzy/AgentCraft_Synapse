@@ -49,7 +49,7 @@ fail visibly when violated.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `ad5630cd750f34fb33426af15b8abfcf71ad6141` |
-| Final commit SHA | `629b6c1` (populated after push) |
+| Final commit SHA | `4883f753ccb8edb16e445926c2d1642db2aa23f3` |
 | Remote synchronization | PASS (verified via `git ls-remote`) |
 | Working tree | CLEAN (in sync with origin/main) |
 
@@ -488,7 +488,7 @@ The full blocker register from ADR-0011 carries forward UNCHANGED.
 After implementing G04-T04 + 19 acceptance tests + demo script:
 
 ```
-Final commit SHA (post-T04): 629b6c1
+Final commit SHA (post-T04): 4883f753ccb8edb16e445926c2d1642db2aa23f3
 Starting checkpoint (for reference): ad5630cd750f34fb33426af15b8abfcf71ad6141
 ```
 

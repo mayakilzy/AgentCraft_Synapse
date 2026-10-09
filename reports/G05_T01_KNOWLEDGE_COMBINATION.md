@@ -36,7 +36,7 @@ parameter that excludes hypothesized relationships by default.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `0039d515083bc21df32796a44807de495e034da6` |
-| Final commit SHA | (populated after push) |
+| Final commit SHA | `c235f1ba3f8a2c1d3df74c590b6b54271b406780` |
 | Remote synchronization | PASS |
 | Working tree | CLEAN |
 
@@ -238,7 +238,7 @@ PRB-01 through PRB-07 remain unchanged.
 ## 9. Final SHA
 
 ```
-Final commit SHA (post-T01): <populated after push>
+Final commit SHA (post-T01): c235f1ba3f8a2c1d3df74c590b6b54271b406780
 Starting checkpoint (for reference): 0039d515083bc21df32796a44807de495e034da6
 ```
 

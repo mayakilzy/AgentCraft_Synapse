@@ -313,6 +313,67 @@ async def create_source_span(
     return span_row
 
 
+# ── Completion-marker-based idempotency ──────────────────────────────────────
+
+
+async def check_extraction_completed(
+    session: AsyncSession,
+    evidence_fragment_id: str,
+    content_fingerprint: str | None = None,
+) -> dict[str, Any] | None:
+    """Check if extraction has completed for this evidence fragment.
+
+    Uses the JobRow table as the completion marker (NOT source_spans
+    existence). A succeeded JobRow for this fragment means extraction
+    is complete.
+
+    Content revision: if content_fingerprint is provided and differs
+    from the fingerprint recorded in the previous successful job,
+    the previous extraction is considered stale — the function returns
+    None so new extraction can run. Old claims/spans are preserved
+    as historical provenance (never deleted).
+
+    Returns:
+        - A dict with completion info if extraction is already done
+          and the content fingerprint matches (or no fingerprint to check).
+        - None if extraction has not completed OR content has changed.
+    """
+    # Find the most recent succeeded job for this fragment
+    stmt = (
+        select(JobRow)
+        .where(
+            JobRow.kind == "extract_knowledge",
+            JobRow.input_ref == evidence_fragment_id,
+            JobRow.status == "succeeded",
+        )
+        .order_by(JobRow.updated_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    succeeded_job = result.scalar_one_or_none()
+
+    if succeeded_job is None:
+        # No succeeded job — extraction not complete (or failed previously)
+        return None
+
+    # Check content fingerprint if provided
+    if content_fingerprint and succeeded_job.output_ref:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            stored_fp = json.loads(succeeded_job.output_ref).get("content_fingerprint")
+            if stored_fp and stored_fp != content_fingerprint:
+                # Content has changed — previous extraction is stale.
+                # Return None so caller can re-extract.
+                # Old claims/spans are preserved (historical provenance).
+                return None
+
+    # Extraction completed and fingerprint matches (or no fingerprint to check)
+    return {
+        "evidence_fragment_id": evidence_fragment_id,
+        "job_id": succeeded_job.id,
+        "message": "extraction_completed",
+    }
+
+
 # ── Content-fingerprint-based reprocessing ──────────────────────────────────
 
 
@@ -323,28 +384,13 @@ async def check_existing_extraction(
 ) -> dict[str, Any] | None:
     """Check if extraction has already been done for this evidence fragment.
 
+    DEPRECATED: use check_extraction_completed() instead, which uses
+    JobRow status as the completion marker. This function is kept for
+    backward compatibility with existing callers.
+
     Returns the previous extraction summary if found, None otherwise.
-
-    The content_fingerprint is used to detect content changes: if the
-    same evidence_fragment_id is reprocessed with a different fingerprint,
-    the previous extraction is NOT deleted — it remains as historical
-    provenance. New entities/claims are created with new source spans.
     """
-    # Check if any source_spans exist for this evidence fragment
-    stmt = select(SourceSpanRow).where(SourceSpanRow.evidence_fragment_id == evidence_fragment_id)
-    result = await session.execute(stmt)
-    existing_spans = result.scalars().all()
-
-    if not existing_spans:
-        return None
-
-    # Extraction was already done. Return a summary.
-    return {
-        "evidence_fragment_id": evidence_fragment_id,
-        "existing_span_count": len(existing_spans),
-        "content_fingerprint": content_fingerprint,
-        "message": "Extraction already performed for this evidence fragment",
-    }
+    return await check_extraction_completed(session, evidence_fragment_id, content_fingerprint)
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
@@ -366,11 +412,20 @@ async def persist_extraction_results(
     3. Records an audit event
     4. Returns a summary
 
-    Idempotency: if the same evidence_fragment_id has already been
-    processed (source_spans exist), the function returns the existing
-    summary without re-extracting — UNLESS the content_fingerprint
-    has changed, in which case new entities/claims are created alongside
-    the old ones (historical provenance retained).
+    Idempotency: uses check_extraction_completed() which checks the
+    JobRow status (not source_spans existence). If a succeeded job
+    exists for this fragment with the same content_fingerprint, the
+    function returns a "skipped" result.
+
+    Content revision: if the content_fingerprint differs from the
+    previous successful job's fingerprint, extraction re-runs. Old
+    claims/spans are preserved (never deleted). New claims are created
+    alongside the old ones.
+
+    Partial-failure retry: find_or_create_entity/claim/span are all
+    idempotent — retrying after a partial failure does not duplicate
+    already-persisted entities, claims, or spans. The job status
+    remains "failed" until a full successful run.
 
     Decoupled from G02: this function is called AFTER the G02
     acquisition transaction has committed. If this function fails,
@@ -378,21 +433,19 @@ async def persist_extraction_results(
     """
     request_id = uuid4().hex
 
-    # Check if already processed
-    existing = await check_existing_extraction(
-        session, evidence_fragment_id, content_fingerprint or ""
-    )
+    # Check if already completed (JobRow-based, not source_spans-based)
+    existing = await check_extraction_completed(session, evidence_fragment_id, content_fingerprint)
     if existing is not None:
         _log.info(
-            "extraction already done for fragment %s — skipping (idempotent)",
+            "extraction already completed for fragment %s — skipping (idempotent)",
             evidence_fragment_id,
         )
         return {
             "ok": True,
             "skipped": True,
-            "reason": "already_extracted",
+            "reason": "already_completed",
             "evidence_fragment_id": evidence_fragment_id,
-            "existing_span_count": existing["existing_span_count"],
+            "job_id": existing.get("job_id"),
             "request_id": request_id,
         }
 
@@ -513,7 +566,7 @@ async def queue_extraction_job(
     *,
     content_fingerprint: str | None = None,
     requester: str | None = None,
-) -> JobRow:
+) -> JobRow | None:
     """Queue a knowledge extraction job for an evidence fragment.
 
     Per requirement #7: keep extraction resumable and independent of
@@ -522,8 +575,46 @@ async def queue_extraction_job(
     durable — the job can be retried by setting status back to
     "queued".
 
+    Duplicate-job prevention: if a non-terminal job (queued or running)
+    already exists for this fragment, returns None (no new job created).
+    This prevents duplicate active jobs for the same fragment.
+
     Uses the existing G01 JobRow table — no message broker.
     """
+    # Check for existing non-terminal (queued or running) job
+    existing_stmt = (
+        select(JobRow)
+        .where(
+            JobRow.kind == "extract_knowledge",
+            JobRow.input_ref == evidence_fragment_id,
+            JobRow.status.in_(["queued", "running"]),
+        )
+        .limit(1)
+    )
+    existing_result = await session.execute(existing_stmt)
+    existing_job = existing_result.scalar_one_or_none()
+
+    if existing_job is not None:
+        # Active job already exists — don't create a duplicate
+        _log.info(
+            "active extraction job already exists for fragment %s (job %s) — skipping",
+            evidence_fragment_id,
+            existing_job.id,
+        )
+        return None
+
+    # Check for existing succeeded job with same fingerprint
+    if content_fingerprint:
+        completed = await check_extraction_completed(
+            session, evidence_fragment_id, content_fingerprint
+        )
+        if completed is not None:
+            _log.info(
+                "extraction already completed for fragment %s — skipping job",
+                evidence_fragment_id,
+            )
+            return None
+
     job_row = JobRow(
         id=uuid4().hex,
         kind="extract_knowledge",
@@ -533,10 +624,111 @@ async def queue_extraction_job(
         output_ref=json.dumps({"content_fingerprint": content_fingerprint})
         if content_fingerprint
         else None,
+        idempotency_key=f"extract:{evidence_fragment_id}:{content_fingerprint or ''}",
     )
     session.add(job_row)
     await session.flush()
     return job_row
+
+
+async def reconcile_missing_extraction_jobs(
+    session: AsyncSession,
+    *,
+    max_new_jobs: int = 50,
+) -> dict[str, Any]:
+    """Detect committed evidence fragments without a succeeded extraction
+    job and schedule processing.
+
+    Per requirement #3: implement a minimal reconciliation mechanism that
+    detects committed evidence fragments with no successfully completed
+    extraction and schedules or resumes processing.
+
+    Idempotent: does not create duplicate active jobs. Uses
+    queue_extraction_job() which prevents duplicates.
+
+        Returns:
+            {"checked": N, "missing": M, "jobs_queued": K, "jobs_retried": R}
+    """
+    # Find all evidence fragments
+    ef_stmt = select(EvidenceFragmentRow.id, EvidenceFragmentRow.content_fingerprint)
+    ef_result = await session.execute(ef_stmt)
+    all_fragments = ef_result.all()
+
+    # Find all fragments that have a succeeded extraction job
+    succeeded_stmt = (
+        select(JobRow.input_ref)
+        .where(
+            JobRow.kind == "extract_knowledge",
+            JobRow.status == "succeeded",
+        )
+        .distinct()
+    )
+    succeeded_result = await session.execute(succeeded_stmt)
+    succeeded_fragments = {row[0] for row in succeeded_result}
+
+    # Find fragments without succeeded extraction
+    missing = [(ef_id, fp) for ef_id, fp in all_fragments if ef_id not in succeeded_fragments]
+
+    jobs_queued = 0
+    jobs_retried = 0
+
+    for ef_id, content_fp in missing[:max_new_jobs]:
+        # Check if there's already a queued/running job for this fragment
+        active_stmt = (
+            select(JobRow)
+            .where(
+                JobRow.kind == "extract_knowledge",
+                JobRow.input_ref == ef_id,
+                JobRow.status.in_(["queued", "running"]),
+            )
+            .limit(1)
+        )
+        active_result = await session.execute(active_stmt)
+        active_job = active_result.scalar_one_or_none()
+
+        if active_job is not None:
+            # Active job exists — don't duplicate
+            continue
+
+        # Check for a failed job to retry
+        failed_stmt = (
+            select(JobRow)
+            .where(
+                JobRow.kind == "extract_knowledge",
+                JobRow.input_ref == ef_id,
+                JobRow.status == "failed",
+            )
+            .order_by(JobRow.updated_at.desc())
+            .limit(1)
+        )
+        failed_result = await session.execute(failed_stmt)
+        failed_job = failed_result.scalar_one_or_none()
+
+        if failed_job is not None:
+            # Retry: reset the failed job to queued
+            failed_job.status = "queued"
+            failed_job.error_code = None
+            failed_job.error_message = None
+            jobs_retried += 1
+        else:
+            # No job at all — queue a new one
+            job = await queue_extraction_job(
+                session,
+                ef_id,
+                content_fingerprint=content_fp,
+                requester="reconciliation",
+            )
+            if job is not None:
+                jobs_queued += 1
+
+    await session.flush()
+
+    return {
+        "checked": len(all_fragments),
+        "missing": len(missing),
+        "jobs_queued": jobs_queued,
+        "jobs_retried": jobs_retried,
+    }
 
 
 async def process_pending_extraction_jobs(

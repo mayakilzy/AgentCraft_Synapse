@@ -67,7 +67,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011", "S101"]
+"tests/**" = ["B011", "S101", "RUF059", "F841"]
 "alembic/**" = ["E", "W", "F"]
 
 [tool.ruff.format]

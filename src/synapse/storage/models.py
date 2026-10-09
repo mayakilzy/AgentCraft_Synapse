@@ -273,3 +273,37 @@ class SourceSpanRow(Base):
         Index("ix_source_spans_evidence_fragment_id", "evidence_fragment_id"),
         Index("ix_source_spans_claim_id", "claim_id"),
     )
+
+
+class RelationshipRow(Base):
+    """Typed, directed edge between entities (G03-T03)."""
+
+    __tablename__ = "relationships"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    from_entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    predicate: Mapped[str] = mapped_column(String(64), nullable=False)
+    direction: Mapped[str] = mapped_column(String(32), nullable=False, default="directed")
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="explicit")
+    verification_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unverified"
+    )
+    evidence_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_method: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    valid_from: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_to: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    superseded_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    derivation_chain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_relationships_from_predicate", "from_entity_id", "predicate"),
+        Index("ix_relationships_to_predicate", "to_entity_id", "predicate"),
+        Index("ix_relationships_origin_verification", "origin", "verification_state"),
+        Index("ix_relationships_from_to", "from_entity_id", "to_entity_id"),
+    )

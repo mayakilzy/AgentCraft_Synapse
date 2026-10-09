@@ -467,7 +467,7 @@ After applying the context-aware contradiction closure + 7 new tests +
 the reasoning.py context passthrough fix:
 
 ```
-Final commit SHA (post-T03C): <populated after git commit and git push>
+Final commit SHA (post-T03C): 2dce73a92e514f2dd1bb3eae05b1fd4c98a58604
 Starting checkpoint (for reference): 228946e14650b762c921463b19cdee3666234a96
 ```
 

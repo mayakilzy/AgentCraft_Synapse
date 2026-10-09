@@ -625,6 +625,7 @@ async def _assess_single_requirement(
             candidates=[],
             evidence_chain=[],
             contradicting_evidence=[],
+            out_of_context_contradictions=[],
             limitations=[],
             unsatisfied_prerequisites=[],
             reason=(
@@ -650,6 +651,7 @@ async def _assess_single_requirement(
             candidates=[],
             evidence_chain=[],
             contradicting_evidence=[],
+            out_of_context_contradictions=[],
             limitations=[],
             unsatisfied_prerequisites=[],
             reason=(
@@ -701,19 +703,42 @@ async def _assess_single_requirement(
         else:
             inapplicable_claims.append(ac)
 
+    # ── 6.5. Collect out-of-context contradictions as visible metadata.
+    #
+    # G04-T03C: separate two concepts:
+    #   - Contradictions APPLICABLE to the current context (from applicable_claims)
+    #   - Contradictions from UNRELATED contexts (from inapplicable_claims)
+    #
+    # Applicable contradictions drive the CONTESTED classification.
+    # Out-of-context contradictions are preserved as visible metadata but
+    # do NOT automatically force CONTESTED (per G04-T03C mission §3).
+    out_of_context_contradictions: list[dict[str, Any]] = []
+    for ac in inapplicable_claims:
+        if ac.get("contradicting_refs"):
+            out_of_context_contradictions.append(
+                {
+                    "claim_id": ac["claim_id"],
+                    "contradicting_refs": ac.get("contradicting_refs", []),
+                    "validity_conditions": ac.get("validity_conditions", []),
+                    "reason": (
+                        "contradiction exists in the knowledge base but the "
+                        "claim's validity_conditions do not match the requested "
+                        "context; not automatically classified as CONTESTED"
+                    ),
+                }
+            )
+
     # ── 7. Determine the classification (deterministic decision tree).
 
-    # 7a. CONTESTED: any assessed claim has outcome CONTESTED, OR any claim
-    # has explicit contradicting_refs. Both sides are preserved, NOT
-    # suppressed.
+    # 7a. CONTESTED: any APPLICABLE assessed claim has outcome CONTESTED,
+    # OR any APPLICABLE claim has explicit contradicting_refs. Both sides
+    # are preserved, NOT suppressed.
     #
-    # G04-T03 fix: has_contradicting_refs and has_contested_outcome are
-    # checked across ALL attributed claims (assessments_with_claim), not
-    # just applicable_claims. A contradiction in the evidence is a
-    # property of the evidence itself, not of the requested context.
-    # Per mission §5 rule 2: "Preserve contradictions." Suppressing a
-    # contradiction just because the context doesn't match would violate
-    # this rule.
+    # G04-T03C: has_contradicting_refs and has_contested_outcome are
+    # checked ONLY on applicable_claims (claims whose validity_conditions
+    # match the requested context). Out-of-context contradictions are
+    # preserved in out_of_context_contradictions above but do NOT force
+    # CONTESTED.
     has_positive = any(
         _positive_outcome((ac.get("assessment") or {}).get("outcome")) for ac in applicable_claims
     )
@@ -722,19 +747,17 @@ async def _assess_single_requirement(
     )
     has_contested_outcome = any(
         (ac.get("assessment") or {}).get("outcome") == VerificationOutcome.CONTESTED
-        for ac in assessments_with_claim
+        for ac in applicable_claims
     )
-    has_contradicting_refs = any(ac.get("contradicting_refs") for ac in assessments_with_claim)
+    has_contradicting_refs = any(ac.get("contradicting_refs") for ac in applicable_claims)
     if has_contested_outcome or has_contradicting_refs:
-        # Build the contradicting evidence list from ALL attributed claims
-        # (applicable + inapplicable) so the contradiction is fully
-        # represented in the evidence chain.
+        # Build the contradicting evidence list from APPLICABLE claims only.
         contra_frags: list[str] = []
-        for ac in assessments_with_claim:
+        for ac in applicable_claims:
             contra_frags.extend(ac.get("contradicting_refs", []))
         chain = await _collect_evidence_chain(
             session,
-            claim_ids=[ac["claim_id"] for ac in assessments_with_claim],
+            claim_ids=[ac["claim_id"] for ac in applicable_claims],
             relationship_ids=[link["relationship_id"] for link in provider_links],
         )
         return RequirementAssessment(
@@ -745,10 +768,11 @@ async def _assess_single_requirement(
             candidates=provider_links,
             evidence_chain=chain,
             contradicting_evidence=sorted(set(contra_frags)),
+            out_of_context_contradictions=out_of_context_contradictions,
             limitations=limitations,
             unsatisfied_prerequisites=unsatisfied_prereqs,
             reason=(
-                "supporting and contradicting evidence present; "
+                "applicable supporting and contradicting evidence present; "
                 "both sides preserved, neither suppressed"
             ),
             applicability_match=True,
@@ -781,6 +805,7 @@ async def _assess_single_requirement(
             candidates=provider_links,
             evidence_chain=chain,
             contradicting_evidence=[],
+            out_of_context_contradictions=out_of_context_contradictions,
             limitations=limitations,
             unsatisfied_prerequisites=unsatisfied_prereqs,
             reason=(
@@ -807,6 +832,7 @@ async def _assess_single_requirement(
             candidates=provider_links,
             evidence_chain=chain,
             contradicting_evidence=[],
+            out_of_context_contradictions=out_of_context_contradictions,
             limitations=limitations,
             unsatisfied_prerequisites=unsatisfied_prereqs,
             reason=(
@@ -853,6 +879,7 @@ async def _assess_single_requirement(
             candidates=provider_links,
             evidence_chain=chain,
             contradicting_evidence=[],
+            out_of_context_contradictions=out_of_context_contradictions,
             limitations=limitations,
             unsatisfied_prerequisites=unsatisfied_prereqs,
             reason="; ".join(reason_parts) or "evidence covers only part of the requirement",
@@ -871,6 +898,7 @@ async def _assess_single_requirement(
             candidates=provider_links,
             evidence_chain=[],
             contradicting_evidence=[],
+            out_of_context_contradictions=out_of_context_contradictions,
             limitations=limitations,
             unsatisfied_prerequisites=unsatisfied_prereqs,
             reason=(
@@ -896,6 +924,7 @@ async def _assess_single_requirement(
         candidates=provider_links,
         evidence_chain=chain,
         contradicting_evidence=[],
+        out_of_context_contradictions=out_of_context_contradictions,
         limitations=limitations,
         unsatisfied_prerequisites=unsatisfied_prereqs,
         reason="cannot determine a reliable classification from available information",

@@ -35,6 +35,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from synapse.application.gap_analyzer import GapClassification, analyze_gap
 from synapse.application.reasoning import (
     DEFAULT_LIMIT,
     MAX_FINDINGS,
@@ -585,22 +586,32 @@ async def test_provider_attribution_remains_correct(app, db_session):
 
 @pytest.mark.asyncio
 async def test_contradictions_remain_visible(app, db_session):
-    """Contradictory evidence must be preserved, not suppressed."""
+    """Contradictory evidence must be preserved, not suppressed.
+
+    G04-T03C: the CONTESTED classification fires only when the
+    contradicting claim's validity_conditions MATCH the requested context.
+    The fixture's claim-rsn-ev has validity_conditions=["AI agent systems"],
+    so context="AI agent systems" is required for CONTESTED to fire.
+    """
     fixture = await _seed_reasoning_fixture(db_session)
     answer = await answer_query(
         db_session,
         "What can synapse do?",
         candidate_entity_ids=[fixture["synapse_id"]],
+        context="AI agent systems",  # G04-T03C: provide matching context
         limit=10,
     )
-    # The evidence verification claim has contradicting_refs, so the
-    # finding for cap-evidence-verification should be CONTESTED.
+    # The evidence verification claim has contradicting_refs, AND its
+    # validity_conditions match the context, so the finding should be
+    # CONTESTED.
     contested_findings = [
         f
         for f in answer["findings"]
         if "contested" in f["text"].lower() or "conflict" in f["text"].lower()
     ]
-    assert len(contested_findings) > 0, "contradictory evidence should be preserved in findings"
+    assert len(contested_findings) > 0, (
+        "applicable contradictory evidence should produce CONTESTED findings"
+    )
 
 
 # ── Test 8: Context mismatch prevents unsupported conclusions ──────────────
@@ -967,3 +978,464 @@ async def test_realistic_demonstration_ai_research_assistant(app, db_session):
         f"overall confidence must be < 0.9 (VERIFIED unreachable), got "
         f"{answer['confidence']['overall']}"
     )
+
+
+# ── G04-T03C: Context-Aware Contradiction Closure tests ─────────────────────
+#
+# Per the G04-T03C mission briefing "Mandatory tests":
+#   - Applicable conflicting evidence → CONTESTED.
+#   - Contradiction only in an unrelated context → visible, but does not
+#     automatically force CONTESTED.
+#   - Mixed applicable and inapplicable contradictory evidence → correct
+#     context-sensitive classification.
+#   - No context supplied → conservative behavior; do not assume universal
+#     applicability.
+#   - Provider A contradiction must not contaminate provider B.
+#   - Evidence references and provenance remain intact.
+#   - G01-G04-T03 regression tests remain green.
+
+
+async def _seed_context_contradiction_fixture(session) -> dict[str, Any]:
+    """Build a fixture specifically for the G04-T03C context-aware
+    contradiction closure tests.
+
+    Entities:
+      - ent-tool-A (tool): candidate provider A
+      - ent-tool-B (tool): candidate provider B (no contradiction)
+      - cap-ctx-X (capability): a capability with two claims attributed to A:
+        - claim-A-applicable: validity_conditions=["AI agents"] + contradicting_refs
+          → APPLICABLE when context contains "AI agents"
+        - claim-A-inapplicable: validity_conditions=["embedded systems"] + contradicting_refs
+          → INAPPLICABLE when context contains "AI agents"
+      - cap-ctx-universal (capability): a capability with a claim that has NO
+        validity_conditions (universal) + contradicting_refs → always applicable
+      - cap-ctx-B-only (capability): a capability with a claim attributed to B
+        + contradicting_refs → only applicable when candidate=B
+    """
+    src_1 = await _make_source(session, "src-ctx-1", "https://example.com/ctx1")
+    src_2 = await _make_source(session, "src-ctx-2", "https://example.com/ctx2")
+    src_3 = await _make_source(session, "src-ctx-3", "https://example.com/ctx3")
+    src_4 = await _make_source(session, "src-ctx-4", "https://example.com/ctx4")
+
+    frag_a = await _make_fragment(
+        session, "frag-ctx-a", src_1, "Tool A provides capability X for AI agents."
+    )
+    frag_b = await _make_fragment(
+        session, "frag-ctx-b", src_2, "Tool A provides capability X for embedded systems."
+    )
+    frag_opp1 = await _make_fragment(
+        session, "frag-ctx-opp1", src_3, "Capability X cannot be fully automated for AI agents."
+    )
+    frag_opp2 = await _make_fragment(
+        session,
+        "frag-ctx-opp2",
+        src_4,
+        "Capability X cannot be fully automated for embedded systems.",
+    )
+    frag_uni = await _make_fragment(
+        session,
+        "frag-ctx-uni",
+        src_1,
+        "Tool A provides universal capability with contradicting evidence.",
+    )
+    frag_opp_uni = await _make_fragment(
+        session, "frag-ctx-opp-uni", src_3, "Universal capability has contradicting evidence."
+    )
+    frag_b_frag = await _make_fragment(
+        session,
+        "frag-ctx-b-frag",
+        src_2,
+        "Tool B provides capability B-only with contradicting evidence.",
+    )
+    frag_opp_b = await _make_fragment(
+        session, "frag-ctx-opp-b", src_4, "Capability B-only has contradicting evidence for Tool B."
+    )
+
+    await _make_entity(session, "ent-ctx-A", "tool", "tool A")
+    await _make_entity(session, "ent-ctx-B", "tool", "tool B")
+    await _make_entity(session, "cap-ctx-X", "capability", "capability X")
+    await _make_entity(session, "cap-ctx-universal", "capability", "universal capability")
+    await _make_entity(session, "cap-ctx-B-only", "capability", "capability B-only")
+
+    # claim-A-applicable: validity_conditions=["AI agents"] + contradicting_refs
+    await _make_claim(
+        session,
+        "claim-A-applicable",
+        "Tool A provides capability X for AI agents.",
+        subject_ref="ent-ctx-A",
+        object_ref="cap-ctx-X",
+        evidence_refs=["frag-ctx-a"],
+        contradicting_refs=["frag-ctx-opp1"],
+        epistemic_state="disputed",
+        validity_conditions=["AI agents"],
+    )
+
+    # claim-A-inapplicable: validity_conditions=["embedded systems"] + contradicting_refs
+    await _make_claim(
+        session,
+        "claim-A-inapplicable",
+        "Tool A provides capability X for embedded systems.",
+        subject_ref="ent-ctx-A",
+        object_ref="cap-ctx-X",
+        evidence_refs=["frag-ctx-b"],
+        contradicting_refs=["frag-ctx-opp2"],
+        epistemic_state="disputed",
+        validity_conditions=["embedded systems"],
+    )
+
+    # claim-A-universal: NO validity_conditions (universal) + contradicting_refs
+    await _make_claim(
+        session,
+        "claim-A-universal",
+        "Tool A provides universal capability with contradicting evidence.",
+        subject_ref="ent-ctx-A",
+        object_ref="cap-ctx-universal",
+        evidence_refs=["frag-ctx-uni"],
+        contradicting_refs=["frag-ctx-opp-uni"],
+        epistemic_state="disputed",
+    )
+
+    # claim-B-only: attributed to B + contradicting_refs
+    await _make_claim(
+        session,
+        "claim-B-only",
+        "Tool B provides capability B-only with contradicting evidence.",
+        subject_ref="ent-ctx-B",
+        object_ref="cap-ctx-B-only",
+        evidence_refs=["frag-ctx-b-frag"],
+        contradicting_refs=["frag-ctx-opp-b"],
+        epistemic_state="disputed",
+        validity_conditions=["AI agents"],
+    )
+
+    # Relationships
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-ctx-A",
+        to_entity_id="cap-ctx-X",
+        predicate="PROVIDES",
+        evidence_refs=["frag-ctx-a"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-ctx-A",
+        to_entity_id="cap-ctx-universal",
+        predicate="PROVIDES",
+        evidence_refs=["frag-ctx-uni"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-ctx-B",
+        to_entity_id="cap-ctx-B-only",
+        predicate="PROVIDES",
+        evidence_refs=["frag-ctx-b-frag"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+
+    await session.commit()
+    for cid in ("claim-A-applicable", "claim-A-inapplicable", "claim-A-universal", "claim-B-only"):
+        await assess_claim(session, cid, requester="fixture")
+    await session.commit()
+
+    return {
+        "tool_A": "ent-ctx-A",
+        "tool_B": "ent-ctx-B",
+        "cap_X": "cap-ctx-X",
+        "cap_universal": "cap-ctx-universal",
+        "cap_B_only": "cap-ctx-B-only",
+    }
+
+
+@pytest.mark.asyncio
+async def test_applicable_conflicting_evidence_contested(app, db_session):
+    """Applicable conflicting evidence → CONTESTED.
+
+    Per G04-T03C mandatory test 1.
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    # context="AI agents" → claim-A-applicable is APPLICABLE (its
+    # validity_conditions match) and has contradicting_refs → CONTESTED.
+    result = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_A"]],
+    )
+    a = result["requirements"][0]
+    assert a["classification"] == GapClassification.CONTESTED, (
+        f"applicable conflicting evidence should be CONTESTED, got "
+        f"{a['classification']}: {a['reason']}"
+    )
+    assert len(a["contradicting_evidence"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_unrelated_context_contradiction_not_contested(app, db_session):
+    """Contradiction only in an unrelated context → visible, but does NOT
+    automatically force CONTESTED.
+
+    Per G04-T03C mandatory test 2.
+
+    Setup: claim-A-inapplicable has validity_conditions=["embedded systems"]
+    + contradicting_refs. With context="AI agents", this claim is
+    INAPPLICABLE. Its contradiction should be preserved as
+    out_of_context_contradictions metadata but should NOT force CONTESTED.
+
+    claim-A-applicable has validity_conditions=["AI agents"] but we DON'T
+    seed contradicting_refs on it for this test (to isolate the
+    inapplicable-contradiction scenario).
+
+    Actually, both claims have contradicting_refs in the fixture. So with
+    context="AI agents":
+    - claim-A-applicable (vcs=["AI agents"]) → APPLICABLE, has contradicting_refs
+      → CONTESTED fires
+    - claim-A-inapplicable (vcs=["embedded systems"]) → INAPPLICABLE, has
+      contradicting_refs → out_of_context_contradictions
+
+    To test the PURE unrelated-context scenario (no applicable contradiction),
+    we query with context="embedded systems":
+    - claim-A-applicable (vcs=["AI agents"]) → INAPPLICABLE → out_of_context
+    - claim-A-inapplicable (vcs=["embedded systems"]) → APPLICABLE → CONTESTED
+
+    Wait, that also has an applicable contradiction. Let me test with
+    context="mobile apps" (matches NEITHER):
+    - Both claims are INAPPLICABLE → both contradictions are out-of-context
+    - No applicable contradiction → NOT CONTESTED
+    - Both contradictions preserved as out_of_context_contradictions
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    # context="mobile apps" matches NEITHER claim's validity_conditions.
+    # Both claims are inapplicable. Both have contradicting_refs.
+    # → out_of_context_contradictions has 2 entries
+    # → NO applicable contradiction → NOT CONTESTED
+    result = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="mobile apps",
+        candidate_entity_ids=[fixture["tool_A"]],
+    )
+    a = result["requirements"][0]
+    assert a["classification"] != GapClassification.CONTESTED, (
+        f"unrelated-context contradiction should NOT force CONTESTED, got "
+        f"{a['classification']}: {a['reason']}"
+    )
+    # The out-of-context contradictions must be preserved as metadata.
+    assert len(a["out_of_context_contradictions"]) >= 1, (
+        f"out-of-context contradictions should be preserved as metadata, "
+        f"got {a.get('out_of_context_contradictions', [])}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_applicable_inapplicable_contradiction(app, db_session):
+    """Mixed applicable and inapplicable contradictory evidence → correct
+    context-sensitive classification.
+
+    Per G04-T03C mandatory test 3.
+
+    Setup: with context="AI agents":
+    - claim-A-applicable (vcs=["AI agents"]) → APPLICABLE, has contradicting_refs
+    - claim-A-inapplicable (vcs=["embedded systems"]) → INAPPLICABLE, has contradicting_refs
+
+    Expected:
+    - Classification = CONTESTED (from the applicable claim)
+    - contradicting_evidence = [frag-ctx-opp1] (from the applicable claim only)
+    - out_of_context_contradictions = [claim-A-inapplicable entry] (1 entry)
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    result = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_A"]],
+    )
+    a = result["requirements"][0]
+    assert a["classification"] == GapClassification.CONTESTED, (
+        f"mixed scenario: applicable contradiction should yield CONTESTED, "
+        f"got {a['classification']}"
+    )
+    # The applicable contradiction (frag-ctx-opp1) must be in contradicting_evidence.
+    assert "frag-ctx-opp1" in a["contradicting_evidence"], (
+        f"applicable contradicting evidence (frag-ctx-opp1) should be in "
+        f"contradicting_evidence: {a['contradicting_evidence']}"
+    )
+    # The inapplicable contradiction (frag-ctx-opp2) must NOT be in
+    # contradicting_evidence (it's in out_of_context_contradictions instead).
+    assert "frag-ctx-opp2" not in a["contradicting_evidence"], (
+        f"inapplicable contradicting evidence (frag-ctx-opp2) should NOT be "
+        f"in contradicting_evidence: {a['contradicting_evidence']}"
+    )
+    # The inapplicable claim must appear in out_of_context_contradictions.
+    ooc_claim_ids = [ooc.get("claim_id") for ooc in a["out_of_context_contradictions"]]
+    assert "claim-A-inapplicable" in ooc_claim_ids, (
+        f"inapplicable claim should be in out_of_context_contradictions: {ooc_claim_ids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_context_conservative_behavior(app, db_session):
+    """No context supplied → conservative behavior; do not assume universal
+    applicability.
+
+    Per G04-T03C mandatory test 4.
+
+    Setup: claim-A-applicable has validity_conditions=["AI agents"] +
+    contradicting_refs. With NO context, the claim is INAPPLICABLE
+    (conservative: conditions exist but caller gave no context).
+    Its contradiction → out_of_context_contradictions, NOT CONTESTED.
+
+    However, claim-A-universal has NO validity_conditions (universal) +
+    contradicting_refs. With no context, it IS applicable (universal).
+    So cap-ctx-universal → CONTESTED.
+
+    For cap-ctx-X (which has claim-A-applicable + claim-A-inapplicable,
+    both with validity_conditions), NO context → both inapplicable →
+    no applicable contradiction → NOT CONTESTED.
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    # No context for cap-ctx-X: both claims have validity_conditions,
+    # both are inapplicable → NOT CONTESTED.
+    result = await analyze_gap(
+        db_session,
+        ["capability X"],
+        candidate_entity_ids=[fixture["tool_A"]],
+        # NO context
+    )
+    a = result["requirements"][0]
+    assert a["classification"] != GapClassification.CONTESTED, (
+        f"no context → conservative: claims with validity_conditions are "
+        f"inapplicable → NOT CONTESTED, got {a['classification']}"
+    )
+    # Both contradictions preserved as out-of-context metadata.
+    assert len(a["out_of_context_contradictions"]) >= 2, (
+        f"both inapplicable contradictions should be preserved as metadata, "
+        f"got {len(a.get('out_of_context_contradictions', []))}"
+    )
+
+    # No context for cap-ctx-universal: claim has NO validity_conditions
+    # (universal) → APPLICABLE even with no context → CONTESTED.
+    result_uni = await analyze_gap(
+        db_session,
+        ["universal capability"],
+        candidate_entity_ids=[fixture["tool_A"]],
+        # NO context
+    )
+    a_uni = result_uni["requirements"][0]
+    assert a_uni["classification"] == GapClassification.CONTESTED, (
+        f"universal claim (no validity_conditions) is applicable even "
+        f"without context → CONTESTED, got {a_uni['classification']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_a_contradiction_no_contaminate_b(app, db_session):
+    """Provider A contradiction must not contaminate provider B.
+
+    Per G04-T03C mandatory test 5.
+
+    Setup: claim-B-only is attributed to ent-ctx-B (subject=ent-ctx-B)
+    with contradicting_refs. cap-ctx-B-only is provided by ent-ctx-B only.
+    When candidate=[ent-ctx-B], the claim is attributed to B → CONTESTED.
+
+    But when candidate=[ent-ctx-A] (which has NO PROVIDES edge to
+    cap-ctx-B-only), the G04-T02C attribution safeguard drops the claim
+    entirely → NO contamination.
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    # Candidate B: claim-B-only is attributed to B → CONTESTED.
+    result_b = await analyze_gap(
+        db_session,
+        ["capability B-only"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_B"]],
+    )
+    a_b = result_b["requirements"][0]
+    assert a_b["classification"] == GapClassification.CONTESTED, (
+        f"B's own claim with contradiction → CONTESTED, got {a_b['classification']}"
+    )
+
+    # Candidate A: A has NO PROVIDES edge to cap-ctx-B-only → NOT_EVIDENCED.
+    # A's candidate filter excludes claim-B-only (subject=ent-ctx-B, not A).
+    result_a = await analyze_gap(
+        db_session,
+        ["capability B-only"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_A"]],
+    )
+    a_a = result_a["requirements"][0]
+    # A has no PROVIDES edge to cap-ctx-B-only → no provider_links → NOT_EVIDENCED.
+    assert a_a["classification"] == GapClassification.NOT_EVIDENCED, (
+        f"A has no PROVIDES edge to cap-ctx-B-only → NOT_EVIDENCED "
+        f"(B's contradiction must NOT contaminate A), got "
+        f"{a_a['classification']}"
+    )
+    # No contradicting_evidence for A (B's claim was filtered out by attribution).
+    assert len(a_a["contradicting_evidence"]) == 0
+    # No out_of_context_contradictions for A either.
+    assert len(a_a.get("out_of_context_contradictions", [])) == 0
+
+
+@pytest.mark.asyncio
+async def test_evidence_references_provenance_intact(app, db_session):
+    """Evidence references and provenance remain intact.
+
+    Per G04-T03C mandatory test 6.
+
+    Out-of-context contradictions must still have their evidence_refs and
+    contradicting_refs preserved (not dropped).
+    """
+    fixture = await _seed_context_contradiction_fixture(db_session)
+
+    result = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="mobile apps",  # matches NEITHER claim's validity_conditions
+        candidate_entity_ids=[fixture["tool_A"]],
+    )
+    a = result["requirements"][0]
+    # Both contradictions are out-of-context.
+    for ooc in a["out_of_context_contradictions"]:
+        assert "claim_id" in ooc, f"claim_id missing in ooc entry: {ooc}"
+        assert "contradicting_refs" in ooc, f"contradicting_refs missing in ooc entry: {ooc}"
+        assert len(ooc["contradicting_refs"]) > 0, f"contradicting_refs should be non-empty: {ooc}"
+        assert "validity_conditions" in ooc, f"validity_conditions missing in ooc entry: {ooc}"
+        assert "reason" in ooc, f"reason missing in ooc entry: {ooc}"
+
+
+def test_g01_g04_t03_regression_after_contradiction_closure():
+    """All existing G01-G04-T03 tests still pass after the G04-T03C fix.
+
+    Per G04-T03C mandatory test 7.
+    """
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/integration/test_g04_t03_reasoning.py",
+            "--no-cov",
+            "-q",
+            "-k",
+            "not test_g01_g04_t03_regression_after_contradiction_closure",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(REPO_ROOT),
+        env=env,
+    )
+    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
+    assert "passed" in r.stdout

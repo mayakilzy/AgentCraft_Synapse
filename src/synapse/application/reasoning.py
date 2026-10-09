@@ -437,6 +437,7 @@ async def _handle_capability_explanation(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'What can X do?' / 'What techniques support Y?'.
@@ -478,6 +479,7 @@ async def _handle_capability_explanation(
                 session,
                 cap_names,
                 candidate_entity_ids=candidate_entity_ids,
+                context=context,
                 limit=limit,
             )
             for req in gap_result.get("requirements", []):
@@ -523,6 +525,21 @@ async def _handle_capability_explanation(
                 # Confidence: average of outcomes for cited claims.
                 confidence = _average_confidence(session, cited_claims) if cited_claims else 0.0
 
+                # G04-T03C: surface out-of-context contradictions as a caveat.
+                # These are contradictions from claims whose validity_conditions
+                # do NOT match the requested context. They are preserved as
+                # visible metadata but do NOT automatically force CONTESTED.
+                out_of_ctx = req.get("out_of_context_contradictions", [])
+                caveat = reason if ftype != FindingType.DOCUMENTED_FACT else None
+                if out_of_ctx:
+                    ooc_note = (
+                        f"{len(out_of_ctx)} out-of-context contradiction(s) "
+                        f"preserved as metadata (not classified as CONTESTED "
+                        f"because the claim's validity_conditions do not match "
+                        f"the requested context)"
+                    )
+                    caveat = f"{caveat}; {ooc_note}" if caveat else ooc_note
+
                 findings.append(
                     Finding(
                         text=text,
@@ -530,7 +547,8 @@ async def _handle_capability_explanation(
                         sources=list({cap_id} if cap_id else set()),
                         evidence_refs=ev_refs,
                         confidence=confidence,
-                        caveat=reason if ftype != FindingType.DOCUMENTED_FACT else None,
+                        caveat=caveat,
+                        out_of_context_contradictions=out_of_ctx,
                     )
                 )
                 if ftype == FindingType.UNKNOWN:
@@ -603,6 +621,7 @@ async def _handle_dependency_analysis(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'What does X require?' / 'What are the dependencies?'
@@ -671,6 +690,7 @@ async def _handle_documented_alternatives(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'What are the alternatives to X?'
@@ -736,6 +756,7 @@ async def _handle_constraint_analysis(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'What limits X?' / 'What are the constraints?'
@@ -787,6 +808,7 @@ async def _handle_technical_comparison(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'Compare X and Y'.
@@ -809,7 +831,7 @@ async def _handle_technical_comparison(
     # Run capability explanation for each candidate.
     for cid in candidate_entity_ids:
         sub_findings, sub_claims, sub_rels, sub_unknowns = await _handle_capability_explanation(
-            session, query, candidate_entity_ids=[cid], limit=limit
+            session, query, candidate_entity_ids=[cid], context=context, limit=limit
         )
         for f in sub_findings:
             f["text"] = f"[candidate={cid}] {f['text']}"
@@ -843,6 +865,7 @@ async def _handle_gap_explanation(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Handle 'What's missing?' / 'What's uncertain?'
@@ -869,6 +892,7 @@ async def _handle_gap_explanation(
         session,
         cap_names,
         candidate_entity_ids=candidate_entity_ids,
+        context=context,
         limit=limit,
     )
 
@@ -912,6 +936,7 @@ async def _handle_unknown_intent(
     query: str,
     *,
     candidate_entity_ids: list[str] | None,
+    context: str | None,
     limit: int,
 ) -> tuple[list[Finding], list[str], list[str], list[str]]:
     """Fallback for unclassifiable queries.
@@ -1071,6 +1096,7 @@ async def answer_query(
         session,
         query,
         candidate_entity_ids=candidate_entity_ids,
+        context=context,
         limit=limit,
     )
 

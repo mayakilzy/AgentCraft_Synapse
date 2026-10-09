@@ -46,7 +46,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 #: Bumped on any structural change to the dataset.
-GOLDEN_DATASET_VERSION: str = "1.0.0"
+#: v1.0.0: initial G04-T04 release (14 cases, 12 categories).
+#: v1.1.0: G04-T04C defect D1+D3 fix — restored natural queries for C04/C08/
+#:   C09/C12/C14 (removed the "Explain capabilities." workaround suffix);
+#:   restored C09's expected_relevant_ids to include all 3 attributed claims.
+GOLDEN_DATASET_VERSION: str = "1.1.0"
 
 
 class EvaluationCategory(StrEnum):
@@ -175,13 +179,15 @@ def load_golden_dataset() -> list[GoldenCase]:
             ),
         ),
         # ── 4. Provider attribution (PATH C capability_explanation) ────
-        # Routes to PATH C because the query contains "explain" (a complex
-        # marker). The reasoning layer's gap_analyzer applies the G04-T02C
-        # provider-attribution safeguard.
+        # G04-T04C defect D1 fix: the router now uses the ``context``
+        # parameter. A capability_explanation query WITH context routes
+        # to PATH C (not PATH A), so the gap_analyzer's provider-
+        # attribution safeguard applies. The query phrasing is natural
+        # (no "Explain capabilities." suffix needed).
         GoldenCase(
             case_id="G04T04-C04",
             category=EvaluationCategory.PROVIDER_ATTRIBUTION,
-            query="What can synapse do? Explain capabilities.",
+            query="What can synapse do?",
             context="AI agent systems",
             candidate_entity_ids=["ent-synapse"],
             expected_relevant_ids=["claim-rsn-sd", "claim-rsn-ce"],
@@ -190,9 +196,9 @@ def load_golden_dataset() -> list[GoldenCase]:
             expected_min_findings=1,
             notes=(
                 "Provider-attribution case: claims attributed to ent-synapse must be retrievable. "
-                "G04-T02C safeguard prevents leakage from ent-arxiv's claims. Query contains "
-                "'explain' marker → routes to PATH C (grounded reasoning) so the gap analyzer's "
-                "attribution safeguard applies."
+                "G04-T02C safeguard prevents leakage from ent-arxiv's claims. Context is provided "
+                "→ router selects PATH C (grounded reasoning) so the gap analyzer's attribution "
+                "safeguard applies."
             ),
         ),
         # ── 5. Dependency reasoning ─────────────────────────────────────
@@ -242,10 +248,13 @@ def load_golden_dataset() -> list[GoldenCase]:
             ),
         ),
         # ── 8. Applicable contradictions ───────────────────────────────
+        # G04-T04C defect D1 fix: router now uses ``context`` parameter.
+        # Natural query "What can tool A do?" + context="AI agents" routes
+        # to PATH C (no need for "Explain capabilities." suffix).
         GoldenCase(
             case_id="G04T04-C08",
             category=EvaluationCategory.APPLICABLE_CONTRADICTIONS,
-            query="What can tool A do? Explain capabilities.",
+            query="What can tool A do?",
             context="AI agents",
             candidate_entity_ids=["ent-ctx-A"],
             expected_relevant_ids=["claim-A-applicable", "claim-A-universal"],
@@ -257,18 +266,28 @@ def load_golden_dataset() -> list[GoldenCase]:
                 "Applicable contradiction: claim-A-applicable has validity_conditions=['AI agents'] "
                 "and contradicting_refs=['frag-ctx-opp1']. Context 'AI agents' matches → "
                 "CONTESTED must fire (preserved, not suppressed). Universal claim also fires "
-                "CONTESTED unconditionally. Query phrased to trigger capability_explanation "
-                "intent (PATH C) so the reasoning layer's gap analyzer evaluates it."
+                "CONTESTED unconditionally."
             ),
         ),
         # ── 9. Out-of-context contradictions ──────────────────────────
+        # G04-T04C defect D1 fix: router now uses ``context`` parameter.
+        # G04-T04C defect D3 fix: restored expected_relevant_ids to include
+        # all 3 claims attributed to ent-ctx-A (claim-A-applicable,
+        # claim-A-inapplicable, claim-A-universal). All three are cited
+        # by the reasoning layer regardless of applicability — the
+        # applicability filtering happens inside the gap analyzer
+        # (which determines classification), not in cited_claims.
         GoldenCase(
             case_id="G04T04-C09",
             category=EvaluationCategory.OUT_OF_CONTEXT_CONTRADICTIONS,
-            query="What can tool A do? Explain capabilities.",
+            query="What can tool A do?",
             context="mobile apps",
             candidate_entity_ids=["ent-ctx-A"],
-            expected_relevant_ids=["claim-A-universal"],
+            expected_relevant_ids=[
+                "claim-A-applicable",
+                "claim-A-inapplicable",
+                "claim-A-universal",
+            ],
             expected_routing_path="C",
             expected_intent="capability_explanation",
             expected_min_findings=1,
@@ -314,10 +333,13 @@ def load_golden_dataset() -> list[GoldenCase]:
             ),
         ),
         # ── 12. Unsupported hypotheses ─────────────────────────────────
+        # G04-T04C defect D1 fix: router now uses ``context`` parameter.
+        # Natural query "What can tool B do?" + context="embedded systems"
+        # routes to PATH C (no need for "Explain capabilities." suffix).
         GoldenCase(
             case_id="G04T04-C12",
             category=EvaluationCategory.UNSUPPORTED_HYPOTHESES,
-            query="What can tool B do? Explain capabilities.",
+            query="What can tool B do?",
             context="embedded systems",
             candidate_entity_ids=["ent-ctx-B"],
             expected_relevant_ids=["claim-B-only"],
@@ -328,8 +350,7 @@ def load_golden_dataset() -> list[GoldenCase]:
             notes=(
                 "claim-B-only has validity_conditions=['AI agents'] but context='embedded systems' "
                 "does not match → claim is inapplicable. The handler should NOT promote the claim "
-                "to a DOCUMENTED_FACT without applicable evidence. Query phrased to trigger "
-                "capability_explanation intent (PATH C)."
+                "to a DOCUMENTED_FACT without applicable evidence."
             ),
         ),
         # ── 13. Extra coverage: ambiguous query (safe fallback) ────────
@@ -347,10 +368,12 @@ def load_golden_dataset() -> list[GoldenCase]:
             ),
         ),
         # ── 14. Extra coverage: universal-claim contradiction ─────────
+        # G04-T04C defect D1 fix: router now uses ``context`` parameter.
+        # Natural query + context routes to PATH C.
         GoldenCase(
             case_id="G04T04-C14",
             category=EvaluationCategory.APPLICABLE_CONTRADICTIONS,
-            query="What can tool A do? Explain capabilities.",
+            query="What can tool A do?",
             context="embedded systems",
             candidate_entity_ids=["ent-ctx-A"],
             expected_relevant_ids=["claim-A-universal"],
@@ -360,8 +383,7 @@ def load_golden_dataset() -> list[GoldenCase]:
             expected_contradiction_preserved=True,
             notes=(
                 "Universal claim (claim-A-universal has no validity_conditions) is ALWAYS "
-                "applicable. Its contradiction must fire CONTESTED regardless of context. "
-                "Query phrased to trigger capability_explanation intent (PATH C)."
+                "applicable. Its contradiction must fire CONTESTED regardless of context."
             ),
         ),
     ]

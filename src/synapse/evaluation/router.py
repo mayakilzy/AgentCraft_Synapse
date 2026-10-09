@@ -149,6 +149,7 @@ _COMPLEX_INTENTS: frozenset[ReasoningIntent] = frozenset(
 def _looks_like_simple_capability_lookup(
     query: str,
     candidate_entity_ids: list[str] | None,
+    context: str | None = None,
 ) -> bool:
     """Heuristic: is this a simple, unambiguous capability-lookup request?
 
@@ -161,12 +162,25 @@ def _looks_like_simple_capability_lookup(
         (multiple clauses separated by "?", or words like "explain",
         "compare", "contrast", "detail") that suggest the user wants
         more than a direct lookup.
+      - No technical context is provided. When ``context`` is supplied,
+        the user wants context-sensitive evaluation, which only PATH C
+        (the gap analyzer with applicability matching) can provide.
+        Routing such a query to PATH A would silently drop the context.
 
     Returns True if all conditions hold.
     """
     if not candidate_entity_ids:
         return False
     if len(query) > 80:
+        return False
+    # G04-T04C defect D1 fix: when context is provided, the user wants
+    # context-sensitive analysis. PATH A (list_capabilities) cannot
+    # apply context — only PATH C (gap_analyzer with applicability
+    # matching) can. Routing a context-bearing capability_explanation
+    # query to PATH A would silently drop the context, violating
+    # mission §7: "Do not route a complex question to a cheaper path
+    # if that would remove required reasoning or evidence handling."
+    if context:
         return False
     q_lower = query.lower()
     # Multi-clause queries (containing "?") suggest the user wants more
@@ -207,13 +221,22 @@ def route_query(
          (grounded reasoning). These intents REQUIRE evidence synthesis
          and must NOT be downgraded.
       3. If the intent is CAPABILITY_EXPLANATION AND a named candidate
-         is provided AND the query is short (≤ 80 chars) → PATH A
-         (direct structured lookup via ``find_capabilities``).
-      4. If the intent is UNKNOWN (no keyword matched) → PATH B
+         is provided AND the query is short (≤ 80 chars) AND no
+         context is provided AND no complex markers are present →
+         PATH A (direct structured lookup via ``find_capabilities``).
+         (G04-T04C defect D1 fix: when ``context`` is provided, PATH A
+         is skipped because it cannot apply context-sensitive
+         applicability matching -- only PATH C can.)
+      4. If the intent is CAPABILITY_EXPLANATION (but NOT a simple
+         lookup -- has context, complex markers, multi-clause, or no
+         candidate) → PATH C (grounded reasoning). This ensures the
+         gap_analyzer's provider-attribution safeguard applies, and
+         that applicable contradictions are surfaced when context is
+         provided.
+      5. If the intent is UNKNOWN (no keyword matched) → PATH B
          (hybrid retrieval) with fallback=PATH C. This is the "safe
          fallback" per mission §7.
-      5. Otherwise (CAPABILITY_EXPLANATION without a candidate, or any
-         other case) → PATH B (hybrid retrieval).
+      6. Default → PATH B (hybrid retrieval).
 
     The router does NOT execute the chosen path. The caller (runner)
     is responsible for invoking the appropriate G04 service.
@@ -222,8 +245,10 @@ def route_query(
         query: natural-language query (max 512 chars, but not enforced here).
         candidate_entity_ids: optional list of entity IDs the query is
             scoped to.
-        context: optional technical context (currently reserved for
-            future routing logic; not used in this version).
+        context: optional technical context. When provided AND the intent
+            is CAPABILITY_EXPLANATION, forces routing to PATH C (the
+            gap analyzer applies context-sensitive applicability matching
+            via phrase-substring overlap with claim ``validity_conditions``).
         budget: optional ResourceBudget to apply. Defaults to
             ``DEFAULT_BUDGET``.
 
@@ -247,32 +272,36 @@ def route_query(
         )
 
     # 2. Simple capability lookup with named candidate → PATH A.
+    #    G04-T04C defect D1 fix: when context is provided, the request
+    #    is NOT a simple lookup -- PATH A cannot apply context-sensitive
+    #    applicability matching. Route to PATH C instead.
     if intent == ReasoningIntent.CAPABILITY_EXPLANATION and _looks_like_simple_capability_lookup(
-        query, candidate_entity_ids
+        query, candidate_entity_ids, context=context
     ):
         return RoutingDecision(
             path=RoutingPath.DIRECT_LOOKUP,
             intent=intent,
             reason=(
-                "capability_explanation intent with named candidate and short simple query — "
-                "direct structured lookup via find_capabilities is sufficient"
+                "capability_explanation intent with named candidate, short simple query, "
+                "and no context — direct structured lookup via find_capabilities is sufficient"
             ),
             budget=bud,
         )
 
-    # 2b. Capability-explanation intent that is NOT a simple lookup (multi-
-    # clause, complex markers, or without a candidate) → PATH C (grounded
-    # reasoning). This ensures the gap_analyzer's provider-attribution
-    # safeguard applies, and that applicable contradictions are surfaced
-    # when context is provided.
+    # 2b. Capability-explanation intent that is NOT a simple lookup (has
+    # context, multi-clause, complex markers, or no candidate) → PATH C
+    # (grounded reasoning). This ensures the gap_analyzer's provider-
+    # attribution safeguard applies, and that applicable contradictions
+    # are surfaced when context is provided.
     if intent == ReasoningIntent.CAPABILITY_EXPLANATION:
         return RoutingDecision(
             path=RoutingPath.GROUNDED_REASONING,
             intent=intent,
             reason=(
-                "capability_explanation intent with complex markers or multi-clause query — "
-                "PATH C grounded reasoning applies the G04-T02C provider-attribution safeguard "
-                "and surfaces applicable contradictions via the gap analyzer"
+                "capability_explanation intent with context, complex markers, or "
+                "multi-clause query — PATH C grounded reasoning applies the G04-T02C "
+                "provider-attribution safeguard and surfaces applicable contradictions "
+                "via the gap analyzer"
             ),
             budget=bud,
         )

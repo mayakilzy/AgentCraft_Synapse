@@ -829,7 +829,7 @@ async def test_09_dependency_direction_evaluation(app, db_session):
 def test_10_direct_lookup_routing():
     """PATH A is selected for simple capability lookups with named candidates."""
     # CAPABILITY_EXPLANATION intent + named candidate + short query, no
-    # complex markers → PATH A.
+    # complex markers, no context → PATH A.
     decision = route_query(
         "What can synapse do?",
         candidate_entity_ids=["ent-synapse"],
@@ -839,20 +839,32 @@ def test_10_direct_lookup_routing():
     )
     assert decision.intent == ReasoningIntent.CAPABILITY_EXPLANATION
 
-    # Even shorter / different wording without complex markers.
+    # Different wording without complex markers also routes to PATH A.
     decision2 = route_query(
         "What capabilities does synapse provide?",
         candidate_entity_ids=["ent-synapse"],
     )
     assert decision2.path == RoutingPath.DIRECT_LOOKUP
 
-    # But a query with "explain" (a complex marker) must NOT route to
-    # PATH A -- it must go to PATH C for proper reasoning.
+    # G04-T04C defect D1 regression test: a capability_explanation query
+    # WITH context must NOT route to PATH A — only PATH C can apply
+    # context-sensitive applicability matching.
     decision3 = route_query(
+        "What can synapse do?",
+        candidate_entity_ids=["ent-synapse"],
+        context="AI agent systems",
+    )
+    assert decision3.path != RoutingPath.DIRECT_LOOKUP, (
+        "queries with context must not route to PATH A (PATH A cannot apply context)"
+    )
+    assert decision3.path == RoutingPath.GROUNDED_REASONING
+
+    # A query with "explain" (a complex marker) must also NOT route to PATH A.
+    decision4 = route_query(
         "What can synapse do? Explain capabilities.",
         candidate_entity_ids=["ent-synapse"],
     )
-    assert decision3.path != RoutingPath.DIRECT_LOOKUP, (
+    assert decision4.path != RoutingPath.DIRECT_LOOKUP, (
         "queries with 'explain' marker must not route to PATH A"
     )
 

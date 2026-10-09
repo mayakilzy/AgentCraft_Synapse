@@ -42,7 +42,7 @@ keyword triggers.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `1e2b30eeab67186553984bcdfbbb0b89bcc6c5a4` |
-| Final commit SHA | `<populated after git commit and git push>` |
+| Final commit SHA | `c6492d71b3db70b466dfa7a74108946b6b1e0065` |
 | Remote synchronization | PASS (verified via `git ls-remote`) |
 | Working tree | CLEAN (in sync with origin/main) |
 
@@ -464,7 +464,7 @@ After implementing G04-T03 + the gap_analyzer.py contradiction-preservation
 fix + the test_system.py 501-list update:
 
 ```
-Final commit SHA (post-T03): <populated after git commit and git push>
+Final commit SHA (post-T03): c6492d71b3db70b466dfa7a74108946b6b1e0065
 Starting checkpoint (for reference): 1e2b30eeab67186553984bcdfbbb0b89bcc6c5a4
 ```
 

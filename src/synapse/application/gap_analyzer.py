@@ -706,6 +706,14 @@ async def _assess_single_requirement(
     # 7a. CONTESTED: any assessed claim has outcome CONTESTED, OR any claim
     # has explicit contradicting_refs. Both sides are preserved, NOT
     # suppressed.
+    #
+    # G04-T03 fix: has_contradicting_refs and has_contested_outcome are
+    # checked across ALL attributed claims (assessments_with_claim), not
+    # just applicable_claims. A contradiction in the evidence is a
+    # property of the evidence itself, not of the requested context.
+    # Per mission §5 rule 2: "Preserve contradictions." Suppressing a
+    # contradiction just because the context doesn't match would violate
+    # this rule.
     has_positive = any(
         _positive_outcome((ac.get("assessment") or {}).get("outcome")) for ac in applicable_claims
     )
@@ -714,17 +722,19 @@ async def _assess_single_requirement(
     )
     has_contested_outcome = any(
         (ac.get("assessment") or {}).get("outcome") == VerificationOutcome.CONTESTED
-        for ac in applicable_claims
+        for ac in assessments_with_claim
     )
-    has_contradicting_refs = any(ac.get("contradicting_refs") for ac in applicable_claims)
+    has_contradicting_refs = any(ac.get("contradicting_refs") for ac in assessments_with_claim)
     if has_contested_outcome or has_contradicting_refs:
-        # Build the contradicting evidence list.
+        # Build the contradicting evidence list from ALL attributed claims
+        # (applicable + inapplicable) so the contradiction is fully
+        # represented in the evidence chain.
         contra_frags: list[str] = []
-        for ac in applicable_claims:
+        for ac in assessments_with_claim:
             contra_frags.extend(ac.get("contradicting_refs", []))
         chain = await _collect_evidence_chain(
             session,
-            claim_ids=[ac["claim_id"] for ac in applicable_claims],
+            claim_ids=[ac["claim_id"] for ac in assessments_with_claim],
             relationship_ids=[link["relationship_id"] for link in provider_links],
         )
         return RequirementAssessment(

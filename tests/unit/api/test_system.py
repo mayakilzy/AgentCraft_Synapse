@@ -53,10 +53,11 @@ def test_future_routes_return_501(client, auth_headers_reader):
     The G02 minimal slice implemented the /sources/* routes.
     The G03-T05 slice implemented the /entities, /relationships,
     /claims/{id}/evidence, and /knowledge/search routes.
+    The G04-T03 slice implemented the /reasoning/queries route.
     These are excluded from the 501 list.
     """
     paths = [
-        ("POST", "/api/v1/reasoning/queries"),
+        # POST /api/v1/reasoning/queries was implemented in G04-T03.
         ("POST", "/api/v1/innovations/generate"),
         ("POST", "/api/v1/experiments"),
         ("POST", "/api/v1/future/scenarios"),

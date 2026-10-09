@@ -78,6 +78,7 @@ component entity ID (lexically comparable) for stable ordering.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -1999,6 +2000,87 @@ def _check_quality_gates(
 # ── Persistence helpers ────────────────────────────────────────────────────
 
 
+def _compute_concept_fingerprint(
+    problem_domain: str,
+    context: str | None,
+    combination_basis: str,
+    template_name: str,
+    component_entity_ids: list[str],
+) -> str:
+    """Compute a deterministic fingerprint for a concept.
+
+    The fingerprint is based on normalized input factors:
+    - problem_domain (lowercased, stripped)
+    - context (lowercased, stripped, or empty)
+    - combination_basis (the capabilities involved)
+    - template_name (which template produced this concept)
+    - component_entity_ids (sorted for determinism)
+
+    Two requests with the same fingerprint produce the same persisted
+    concept identity (idempotent reuse). Requests with different
+    fingerprints produce distinct concepts.
+    """
+    normalized_domain = (problem_domain or "").strip().lower()
+    normalized_context = (context or "").strip().lower()
+    normalized_basis = (combination_basis or "").strip().lower()
+    sorted_components = sorted(component_entity_ids)
+
+    fingerprint_input = json.dumps(
+        {
+            "domain": normalized_domain,
+            "context": normalized_context,
+            "basis": normalized_basis,
+            "template": template_name,
+            "components": sorted_components,
+        },
+        sort_keys=True,
+    )
+
+    return hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()[:32]
+
+
+async def _find_existing_concept(
+    session: AsyncSession,
+    fingerprint: str,
+) -> tuple[str, str] | None:
+    """Find an existing innovation concept by its fingerprint.
+
+    The fingerprint is stored in ``EntityRow.attributes`` as a JSON field
+    ``concept_fingerprint``. Returns (innovation_entity_id, hypothesis_claim_id)
+    if found, or None.
+
+    This enables idempotent reuse: equivalent repeated requests return the
+    same persisted concept instead of creating duplicates.
+    """
+    # Search for an EntityRow with kind="project" whose attributes contain
+    # the concept_fingerprint. The attributes column is JSON text.
+    stmt = select(EntityRow).where(
+        EntityRow.kind == "project",
+        EntityRow.attributes.contains(fingerprint),
+    )
+    result = await session.execute(stmt)
+    entity = result.scalar_one_or_none()
+    if entity is None:
+        return None
+
+    # Find the hypothesis claim linked to this innovation entity
+    claim_stmt = (
+        select(ClaimRow)
+        .where(
+            ClaimRow.subject_ref == entity.id,
+            ClaimRow.epistemic_state == "hypothesized",
+        )
+        .order_by(ClaimRow.created_at.desc())
+        .limit(1)
+    )
+    claim_result = await session.execute(claim_stmt)
+    claim = claim_result.scalar_one_or_none()
+    if claim is None:
+        return None
+
+    return entity.id, claim.id
+
+
 async def _persist_concept(
     session: AsyncSession,
     concept_data: dict[str, Any],
@@ -2006,16 +2088,38 @@ async def _persist_concept(
     context: str | None,
     existing_ids: dict[str, set[str]],
     request_id: str,
-) -> tuple[str, str]:
+    template_name: str,
+) -> tuple[str, str, bool]:
     """Persist an innovation concept and its hypothesis.
 
     Per the approved storage mapping (§4.1.2):
     - Innovation entity: EntityRow(kind="project")
     - Hypothesis: ClaimRow(epistemic_state="hypothesized")
 
-    Returns (innovation_entity_id, hypothesis_claim_id).
+    G05-T03C: Idempotent reuse. Before creating a new concept, compute
+    a deterministic fingerprint and check for an existing concept with
+    the same fingerprint. If found, reuse it (no duplicate creation).
+
+    Returns (innovation_entity_id, hypothesis_claim_id, was_reused).
     """
-    concept_id = f"innov-{uuid4().hex[:16]}"
+    # Compute the deterministic fingerprint
+    component_ids = [comp.get("entity_id", "") for comp in concept_data.get("components", [])]
+    fingerprint = _compute_concept_fingerprint(
+        problem_domain=problem_domain,
+        context=context,
+        combination_basis=concept_data.get("combination_basis", ""),
+        template_name=template_name,
+        component_entity_ids=component_ids,
+    )
+
+    # Check for an existing concept with the same fingerprint
+    existing = await _find_existing_concept(session, fingerprint)
+    if existing is not None:
+        # Reuse the existing concept — no duplicate creation
+        return existing[0], existing[1], True
+
+    # Create new concept with a deterministic ID derived from the fingerprint
+    concept_id = f"innov-{fingerprint[:16]}"
 
     # Create the innovation entity
     innov_entity = EntityRow(
@@ -2034,6 +2138,8 @@ async def _persist_concept(
                 "uncertainties": concept_data.get("uncertainties", []),
                 "target_users": concept_data.get("target_users", []),
                 "request_id": request_id,
+                "concept_fingerprint": fingerprint,
+                "template_name": template_name,
             }
         ),
         description=concept_data.get("purpose", ""),
@@ -2043,7 +2149,7 @@ async def _persist_concept(
     await session.flush()
 
     # Create the hypothesis claim (always epistemic_state="hypothesized")
-    hypothesis_id = f"hyp-{uuid4().hex[:16]}"
+    hypothesis_id = f"hyp-{fingerprint[:16]}"
     hypothesis_claim = ClaimRow(
         id=hypothesis_id,
         proposition=(
@@ -2064,13 +2170,25 @@ async def _persist_concept(
     session.add(hypothesis_claim)
     await session.flush()
 
-    # Create hypothesized PROVIDES relationships from the innovation entity
+    # Create hypothesized relationships from the innovation entity
     # to its component entities (these are origin="hypothesized" — epistemically isolated)
+    # Use a deterministic relationship ID to prevent duplicates on retry
     for comp in concept_data.get("components", []):
         comp_eid = comp.get("entity_id")
         if comp_eid and comp_eid in existing_ids["entities"]:
+            # Deterministic rel ID from fingerprint + component ID
+            rel_fingerprint = hashlib.sha256(f"{fingerprint}:{comp_eid}".encode()).hexdigest()[:16]
+            rel_id = f"rel-{rel_fingerprint}"
+
+            # Check if this relationship already exists (prevents duplicates)
+            existing_rel = (
+                await session.execute(select(RelationshipRow).where(RelationshipRow.id == rel_id))
+            ).scalar_one_or_none()
+            if existing_rel is not None:
+                continue  # skip — relationship already exists
+
             rel = RelationshipRow(
-                id=f"rel-{uuid4().hex[:16]}",
+                id=rel_id,
                 from_entity_id=concept_id,
                 to_entity_id=comp_eid,
                 predicate="INTEGRATES_WITH",
@@ -2084,7 +2202,7 @@ async def _persist_concept(
             session.add(rel)
     await session.flush()
 
-    return concept_id, hypothesis_id
+    return concept_id, hypothesis_id, False
 
 
 # ── Main entry point ────────────────────────────────────────────────────────
@@ -2274,13 +2392,14 @@ async def generate_innovations(
                     continue
 
             # Persist the concept and its hypothesis
-            innovation_id, hypothesis_id = await _persist_concept(
+            innovation_id, hypothesis_id, _was_reused = await _persist_concept(
                 session,
                 concept_data,
                 problem_domain,
                 context,
                 existing_ids,
                 request_id,
+                template_name=template_fn.__name__.replace("_template_", ""),
             )
 
             concepts.append(
@@ -2340,13 +2459,14 @@ async def generate_innovations(
                 "opportunities_addressed": [],
             }
 
-            innovation_id, hypothesis_id = await _persist_concept(
+            innovation_id, hypothesis_id, _was_reused = await _persist_concept(
                 session,
                 concept_data,
                 problem_domain,
                 context,
                 existing_ids,
                 request_id,
+                template_name="single_component",
             )
 
             concepts.append(

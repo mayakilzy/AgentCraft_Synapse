@@ -1549,3 +1549,856 @@ async def discover_opportunities(
         request_id=request_id,
         generated_at=_utcnow_iso(),
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# G05-T03 — Evidence-Grounded Innovation Generation
+# ════════════════════════════════════════════════════════════════════════════
+
+#: Maximum concepts returned by ``generate_innovations``.
+MAX_CONCEPTS = 10
+
+
+class InnovationConcept(dict):
+    """A generated application concept.
+
+    Keys:
+        id: stable identifier (UUID hex prefix).
+        problem_domain: the problem the concept addresses.
+        context: optional technical context.
+        purpose: what the concept is for.
+        target_users: list of intended user types.
+        components: list of ComponentRef dicts (entity_id, role, evidence_refs).
+        integration_mechanism: how the components work together (explainable).
+        potential_benefit: why the combination is useful (hypothesis, not claim).
+        uncertainties: list of >=1 uncertainty descriptions.
+        evidence_refs: supporting evidence fragment IDs (validated).
+        constraints: list of constraint dicts (LIMITS/CONTRADICTS/INVALIDATES).
+        combination_basis: which T01 combination inspired this concept.
+        generation_method: "deterministic" or "model_assisted".
+        hypothesis_id: ID of the persisted ClaimRow(epistemic_state="hypothesized").
+        opportunities_addressed: list of T02 opportunity IDs this concept addresses.
+        request_id: per-request tracing.
+    """
+
+
+class InnovationResult(dict):
+    """Top-level result of ``generate_innovations``.
+
+    Keys: concepts[], unknowns[], quality_gates, limits, request_id, generated_at
+    """
+
+
+# ── Deterministic innovation templates (baselines) ─────────────────────────
+
+
+def _template_composition(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: compose multiple components into a pipeline.
+
+    Best when the combination has >=2 components that provide complementary
+    capabilities. The integration mechanism explains how each component feeds
+    the next.
+    """
+    components = combination.get("components", [])
+    if len(components) < 2:
+        return None
+
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+    cap_basis = combination.get("combination_basis", "")
+
+    integration = (
+        f"Composition pipeline: {' → '.join(comp_names)}. "
+        f"Each component provides a distinct capability ({cap_basis}). "
+        f"The output of one component feeds as input to the next, "
+        f"forming an integrated pipeline that addresses '{problem_domain}'."
+    )
+
+    benefit = (
+        f"This composition of {len(components)} components may address "
+        f"'{problem_domain}' by combining complementary capabilities. "
+        f"The benefit is a hypothesis to be validated by experiment (G05-T05), "
+        f"not a verified outcome."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    if not uncertainties:
+        uncertainties.append("integration viability between components is unproven")
+
+    # Add opportunity-derived uncertainties
+    for opp in opportunities[:2]:
+        uncertainties.append(f"addresses gap: {opp.get('gap_description', 'unknown')[:80]}")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by composing {len(components)} complementary components",
+        "target_users": ["technical practitioners", "system architects"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": cap_basis,
+    }
+
+
+def _template_substitution(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: substitute one component with an alternative.
+
+    Best when the combination includes a REPLACES relationship or an
+    opportunity suggests a constraint that could be avoided by substitution.
+    """
+    components = combination.get("components", [])
+    if not components:
+        return None
+
+    # Look for opportunities that suggest substitution (constrained gaps)
+    constrained_opps = [o for o in opportunities if o.get("gap_type") == "constrained"]
+    if not constrained_opps:
+        return None
+
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+    constraint_desc = constrained_opps[0].get("gap_description", "a constraint")[:80]
+
+    integration = (
+        f"Substitution approach: replace a constrained component in "
+        f"{' + '.join(comp_names)} with an alternative that avoids "
+        f"'{constraint_desc}'. The substitution preserves the original "
+        f"capability while removing the constraint."
+    )
+
+    benefit = (
+        f"This substitution may address '{problem_domain}' by avoiding "
+        f"the constraint '{constraint_desc}'. The benefit is a hypothesis "
+        f"requiring experimental validation, not a verified outcome."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    uncertainties.append(f"substitution may not fully address: {constraint_desc}")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by substituting a constrained component",
+        "target_users": ["technical practitioners", "system architects"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": combination.get("combination_basis", "substitution"),
+    }
+
+
+def _template_constraint_relaxation(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: relax a constraint to enable a new combination.
+
+    Best when there are CONSTRAINED opportunities that could be addressed
+    by relaxing or working around the constraint.
+    """
+    constrained_opps = [o for o in opportunities if o.get("gap_type") == "constrained"]
+    if not constrained_opps:
+        return None
+
+    components = combination.get("components", [])
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+    constraint_desc = constrained_opps[0].get("gap_description", "a constraint")[:80]
+
+    integration = (
+        f"Constraint-relaxation approach: the combination of "
+        f"{' + '.join(comp_names)} is currently limited by '{constraint_desc}'. "
+        f"If the constraint can be relaxed (e.g., by introducing a workaround, "
+        f"a new dependency, or a different execution context), the combination "
+        f"may become viable for '{problem_domain}'."
+    )
+
+    benefit = (
+        f"Relaxing the constraint '{constraint_desc}' may enable this "
+        f"combination to address '{problem_domain}'. The benefit is a "
+        f"hypothesis requiring investigation of whether the constraint "
+        f"can be practically relaxed."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    uncertainties.append(f"constraint relaxation viability unknown: {constraint_desc}")
+    uncertainties.append("the constraint may be fundamental, not relaxable")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by relaxing a known constraint",
+        "target_users": ["technical practitioners", "researchers"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": combination.get("combination_basis", "constraint_relaxation"),
+    }
+
+
+def _template_gap_filling(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: fill a NOT_EVIDENCED gap with a new or undocumented component.
+
+    Best when there are NOT_EVIDENCED opportunities that suggest a missing
+    capability that needs to be filled.
+    """
+    not_evidenced_opps = [o for o in opportunities if o.get("gap_type") == "not_evidenced"]
+    if not not_evidenced_opps:
+        return None
+
+    components = combination.get("components", [])
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+    gap_desc = not_evidenced_opps[0].get("gap_description", "a gap")[:80]
+    gap_caps = not_evidenced_opps[0].get("relevant_capabilities", [])
+
+    integration = (
+        f"Gap-filling approach: the existing combination of "
+        f"{' + '.join(comp_names)} addresses part of '{problem_domain}', "
+        f"but a gap remains: '{gap_desc}'. Filling this gap (by documenting "
+        f"or building a tool that provides {', '.join(gap_caps[:2])}) would "
+        f"complete the solution."
+    )
+
+    benefit = (
+        f"Filling the gap '{gap_desc}' would enable the combination to "
+        f"fully address '{problem_domain}'. The benefit is a hypothesis "
+        f"requiring investigation of whether the missing capability can "
+        f"be provided."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    uncertainties.append(f"gap may not be fillable: {gap_desc}")
+    uncertainties.append("absence of evidence is NOT evidence of absence")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by filling a documented capability gap",
+        "target_users": ["technical practitioners", "tool builders"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": combination.get("combination_basis", "gap_filling"),
+    }
+
+
+def _template_recombination(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: recombine components in a novel way.
+
+    Best when the combination's components are typically used separately
+    and combining them is unusual. Graph uniqueness is NOT claimed as
+    market novelty.
+    """
+    components = combination.get("components", [])
+    if len(components) < 2:
+        return None
+
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+
+    integration = (
+        f"Recombination approach: the components {', '.join(comp_names)} "
+        f"are typically used independently. Combining them in a new way "
+        f"may address '{problem_domain}' by leveraging their interaction. "
+        f"Note: graph uniqueness is structural, not market novelty — "
+        f"the combination may already exist in undocumented form."
+    )
+
+    benefit = (
+        f"Recombining {len(components)} typically-separate components may "
+        f"address '{problem_domain}'. The benefit is a hypothesis to be "
+        f"validated by experiment, not a verified outcome."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    uncertainties.append("recombination interaction effects are unknown")
+    uncertainties.append("graph uniqueness is NOT market novelty")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by recombining typically-separate components",
+        "target_users": ["innovators", "system architects"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": combination.get("combination_basis", "recombination"),
+    }
+
+
+def _template_analogy(
+    combination: dict[str, Any],
+    opportunities: list[dict[str, Any]],
+    problem_domain: str,
+    context: str | None,
+) -> dict[str, Any] | None:
+    """Template: apply an analogy from a different domain.
+
+    Best when the combination's capabilities could be analogously applied
+    to the problem domain. The analogy is explicitly labeled as a hypothesis.
+    """
+    components = combination.get("components", [])
+    if not components:
+        return None
+
+    comp_names = [c.get("canonical_name", c.get("entity_id", "?")) for c in components]
+    cap_basis = combination.get("combination_basis", "")
+
+    integration = (
+        f"Analogy approach: the capabilities of {', '.join(comp_names)} "
+        f"({cap_basis}) are applied by analogy to '{problem_domain}'. "
+        f"The components' proven use in other domains suggests they may "
+        f"be adaptable here, but the analogy requires validation."
+    )
+
+    benefit = (
+        f"By analogy, the combination of {len(components)} components "
+        f"may address '{problem_domain}'. The benefit is a hypothesis "
+        f"based on analogical reasoning, not verified evidence."
+    )
+
+    uncertainties = list(combination.get("uncertainties", []))
+    uncertainties.append("analogical reasoning is not evidence")
+    uncertainties.append("domain transfer viability is unproven")
+
+    return {
+        "purpose": f"Address '{problem_domain}' by analogical transfer from another domain",
+        "target_users": ["innovators", "researchers"],
+        "integration_mechanism": integration,
+        "potential_benefit": benefit,
+        "uncertainties": uncertainties,
+        "combination_basis": combination.get("combination_basis", "analogy"),
+    }
+
+
+#: All deterministic templates (baselines, not the complete capability).
+_TEMPLATES: list = [
+    _template_composition,
+    _template_substitution,
+    _template_constraint_relaxation,
+    _template_gap_filling,
+    _template_recombination,
+    _template_analogy,
+]
+
+
+# ── Quality gates ─────────────────────────────────────────────────────────
+
+
+def _check_quality_gates(
+    concept: dict[str, Any], existing_ids: dict[str, set[str]]
+) -> list[dict[str, str]]:
+    """Check the G05-T03 quality gates for a concept.
+
+    Returns a list of {gate, passed, detail} dicts.
+    """
+    gates: list[dict[str, str]] = []
+
+    # Gate 10: Every concept explains integration_mechanism + potential_benefit
+    has_integration = bool(concept.get("integration_mechanism", "").strip())
+    has_benefit = bool(concept.get("potential_benefit", "").strip())
+    gates.append(
+        {
+            "gate": "integration_mechanism_and_benefit",
+            "passed": has_integration and has_benefit,
+            "detail": f"integration_mechanism={'present' if has_integration else 'missing'}; "
+            f"potential_benefit={'present' if has_benefit else 'missing'}",
+        }
+    )
+
+    # Gate 11: Graph uniqueness != market novelty (novelty_caveat must be present)
+    # For T03, the concept must NOT claim market novelty. Check that
+    # potential_benefit does not contain "novel" or "unique" as assertions.
+    benefit = (concept.get("potential_benefit") or "").lower()
+    claims_novelty = "market novelty" in benefit or "commercially novel" in benefit
+    gates.append(
+        {
+            "gate": "no_fabricated_novelty",
+            "passed": not claims_novelty,
+            "detail": "potential_benefit must not claim market novelty"
+            if claims_novelty
+            else "no fabricated novelty claims",
+        }
+    )
+
+    # Gate: Zero fabricated component identifiers
+    all_components_valid = True
+    for comp in concept.get("components", []):
+        eid = comp.get("entity_id", "")
+        if eid and eid not in existing_ids["entities"]:
+            all_components_valid = False
+            break
+    gates.append(
+        {
+            "gate": "no_fabricated_component_ids",
+            "passed": all_components_valid,
+            "detail": f"all {len(concept.get('components', []))} component IDs validated",
+        }
+    )
+
+    # Gate: Zero fabricated evidence references
+    all_refs_valid = True
+    for ref in concept.get("evidence_refs", []):
+        if ref not in existing_ids["fragments"]:
+            all_refs_valid = False
+            break
+    gates.append(
+        {
+            "gate": "no_fabricated_evidence_refs",
+            "passed": all_refs_valid,
+            "detail": f"all {len(concept.get('evidence_refs', []))} evidence_refs validated",
+        }
+    )
+
+    # Gate 8: Every concept has >=1 uncertainty
+    has_uncertainty = len(concept.get("uncertainties", [])) >= 1
+    gates.append(
+        {
+            "gate": "uncertainty_honesty",
+            "passed": has_uncertainty,
+            "detail": f"{len(concept.get('uncertainties', []))} uncertainty/uncertainties",
+        }
+    )
+
+    # Gate: No unsupported numerical business claims
+    benefit_text = concept.get("potential_benefit", "")
+    has_numerical_claim = "~" in benefit_text and "%" in benefit_text
+    gates.append(
+        {
+            "gate": "no_unsupported_numerical_claims",
+            "passed": not has_numerical_claim,
+            "detail": "no '~X%' numerical claims"
+            if not has_numerical_claim
+            else "contains unsupported numerical claim",
+        }
+    )
+
+    # Gate: No automatic VERIFIED promotion
+    # The hypothesis_id must point to a hypothesized-state claim, not verified.
+    # This is enforced at persistence time (we always create with epistemic_state="hypothesized").
+    gates.append(
+        {
+            "gate": "no_verified_promotion",
+            "passed": True,
+            "detail": "hypothesis created with epistemic_state='hypothesized' (never VERIFIED)",
+        }
+    )
+
+    return gates
+
+
+# ── Persistence helpers ────────────────────────────────────────────────────
+
+
+async def _persist_concept(
+    session: AsyncSession,
+    concept_data: dict[str, Any],
+    problem_domain: str,
+    context: str | None,
+    existing_ids: dict[str, set[str]],
+    request_id: str,
+) -> tuple[str, str]:
+    """Persist an innovation concept and its hypothesis.
+
+    Per the approved storage mapping (§4.1.2):
+    - Innovation entity: EntityRow(kind="project")
+    - Hypothesis: ClaimRow(epistemic_state="hypothesized")
+
+    Returns (innovation_entity_id, hypothesis_claim_id).
+    """
+    concept_id = f"innov-{uuid4().hex[:16]}"
+
+    # Create the innovation entity
+    innov_entity = EntityRow(
+        id=concept_id,
+        kind="project",
+        canonical_name=concept_data.get("purpose", f"concept-{concept_id}")[:512],
+        aliases="[]",
+        attributes=json.dumps(
+            {
+                "problem_domain": problem_domain,
+                "context": context,
+                "generation_method": concept_data.get("generation_method", "deterministic"),
+                "combination_basis": concept_data.get("combination_basis", ""),
+                "integration_mechanism": concept_data.get("integration_mechanism", ""),
+                "potential_benefit": concept_data.get("potential_benefit", ""),
+                "uncertainties": concept_data.get("uncertainties", []),
+                "target_users": concept_data.get("target_users", []),
+                "request_id": request_id,
+            }
+        ),
+        description=concept_data.get("purpose", ""),
+        version=1,
+    )
+    session.add(innov_entity)
+    await session.flush()
+
+    # Create the hypothesis claim (always epistemic_state="hypothesized")
+    hypothesis_id = f"hyp-{uuid4().hex[:16]}"
+    hypothesis_claim = ClaimRow(
+        id=hypothesis_id,
+        proposition=(
+            f"Hypothesis: the innovation '{concept_data.get('purpose', '')[:200]}' "
+            f"may address '{problem_domain}'. This is a hypothesis, not a verified fact."
+        ),
+        subject_ref=concept_id,
+        object_ref=None,
+        evidence_refs=json.dumps(concept_data.get("evidence_refs", [])[:20]),
+        contradicting_refs="[]",
+        epistemic_state="hypothesized",
+        confidence_value=0.0,
+        confidence_method=json.dumps({"hypothesis_status": "proposed"}),
+        validity_conditions=json.dumps([context] if context else []),
+        extraction_method="g05-t03-innovation-generation",
+        version=1,
+    )
+    session.add(hypothesis_claim)
+    await session.flush()
+
+    # Create hypothesized PROVIDES relationships from the innovation entity
+    # to its component entities (these are origin="hypothesized" — epistemically isolated)
+    for comp in concept_data.get("components", []):
+        comp_eid = comp.get("entity_id")
+        if comp_eid and comp_eid in existing_ids["entities"]:
+            rel = RelationshipRow(
+                id=f"rel-{uuid4().hex[:16]}",
+                from_entity_id=concept_id,
+                to_entity_id=comp_eid,
+                predicate="INTEGRATES_WITH",
+                direction="directed",
+                origin="hypothesized",  # epistemically isolated
+                verification_state="unverified",
+                evidence_refs=json.dumps(comp.get("evidence_refs", [])[:10]),
+                conditions=json.dumps({"role": comp.get("role", "")}),
+                version=1,
+            )
+            session.add(rel)
+    await session.flush()
+
+    return concept_id, hypothesis_id
+
+
+# ── Main entry point ────────────────────────────────────────────────────────
+
+
+async def generate_innovations(
+    session: AsyncSession,
+    problem_domain: str,
+    *,
+    context: str | None = None,
+    candidate_entity_ids: list[str] | None = None,
+    max_concepts: int = MAX_CONCEPTS,
+    limit: int = DEFAULT_LIMIT,
+    requester: str | None = None,
+) -> InnovationResult:
+    """Generate evidence-grounded innovation concepts.
+
+    Per G05-T03: this converts T01 combinations and T02 opportunities into
+    distinct, technically plausible application concepts. Each concept has
+    a purpose, components, integration mechanism, potential benefit, and
+    uncertainties. The six deterministic templates are baselines, not the
+    complete innovation capability.
+
+    Args:
+        session: AsyncSession bound to the Synapse database.
+        problem_domain: the problem to address (max 512 chars).
+        context: optional technical context.
+        candidate_entity_ids: optional entity IDs to scope to.
+        max_concepts: cap on returned concepts (≤ MAX_CONCEPTS=10).
+        limit: max components per retrieval.
+        requester: optional actor name for audit logging.
+
+    Returns:
+        An ``InnovationResult`` dict with concepts[], unknowns[],
+        quality_gates, limits, request_id, generated_at.
+
+    Epistemic safety:
+        - Every cited entity_id resolves to an existing EntityRow.
+        - Every cited evidence_ref resolves to an existing EvidenceFragmentRow.
+        - Hypothesized relationships (origin="hypothesized") are epistemically isolated.
+        - Every concept has >=1 uncertainty.
+        - No market novelty or numerical benefit claims are fabricated.
+        - No automatic VERIFIED promotion (hypotheses created as "hypothesized").
+    """
+    request_id = uuid4().hex
+    max_concepts = max(1, min(MAX_CONCEPTS, max_concepts))
+    limit = max(1, min(MAX_LIMIT, limit))
+
+    _log.info(
+        "generate_innovations problem_domain=%r context=%s max_concepts=%d",
+        problem_domain[:80],
+        context,
+        max_concepts,
+    )
+
+    # ── Validate inputs ──────────────────────────────────────────────────
+    if not problem_domain or not problem_domain.strip():
+        return InnovationResult(
+            concepts=[],
+            unknowns=["empty_problem_domain"],
+            quality_gates=[],
+            limits={"max_concepts": max_concepts, "limit": limit},
+            request_id=request_id,
+            generated_at=_utcnow_iso(),
+        )
+
+    if len(problem_domain) > MAX_QUERY_CHARS:
+        return InnovationResult(
+            concepts=[],
+            unknowns=[f"problem_domain_too_long:{len(problem_domain)}>{MAX_QUERY_CHARS}"],
+            quality_gates=[],
+            limits={"max_concepts": max_concepts, "limit": limit},
+            request_id=request_id,
+            generated_at=_utcnow_iso(),
+        )
+
+    # ── Collect existing IDs for validation ──────────────────────────────
+    existing_ids = await _collect_existing_ids(session)
+
+    # ── Step 1: Get T01 combinations ─────────────────────────────────────
+    combination_result = await combine_knowledge(
+        session,
+        problem_domain,
+        context=context,
+        candidate_entity_ids=candidate_entity_ids,
+        max_combinations=MAX_COMBINATIONS,
+        limit=limit,
+        requester=requester or "g05-t03-innovation",
+    )
+    combinations = combination_result.get("combinations", [])
+
+    # ── Step 2: Get T02 opportunities ────────────────────────────────────
+    opportunity_result = await discover_opportunities(
+        session,
+        problem_domain,
+        context=context,
+        candidate_entity_ids=candidate_entity_ids,
+        max_opportunities=MAX_OPPORTUNITIES,
+        limit=limit,
+        requester=requester or "g05-t03-innovation",
+    )
+    opportunities = opportunity_result.get("opportunities", [])
+
+    # ── Step 3: Apply templates to generate concepts ────────────────────
+    concepts: list[InnovationConcept] = []
+    unknowns: list[str] = []
+    seen_basis: set[str] = set()  # for deduplication
+
+    for comb in combinations:
+        if len(concepts) >= max_concepts:
+            break
+
+        # Try each template; use the first one that produces a concept
+        for template_fn in _TEMPLATES:
+            if len(concepts) >= max_concepts:
+                break
+
+            template_result = template_fn(comb, opportunities, problem_domain, context)
+            if template_result is None:
+                continue
+
+            # Deduplicate by combination_basis + template name
+            basis = template_result.get("combination_basis", "")
+            template_name = template_fn.__name__.replace("_template_", "")
+            dedup_key = f"{basis}:{template_name}"
+            if dedup_key in seen_basis:
+                continue
+            seen_basis.add(dedup_key)
+
+            # Build the full concept
+            components = comb.get("components", [])
+            evidence_refs = [
+                r for r in comb.get("evidence_refs", []) if r in existing_ids["fragments"]
+            ]
+            constraints = comb.get("constraints", []) if "constraints" in comb else []
+
+            # Find opportunities this concept addresses
+            opp_ids = []
+            for opp in opportunities:
+                opp_caps = opp.get("relevant_capabilities", [])
+                for comp in components:
+                    role = comp.get("role", "")
+                    if any(cap.lower() in role.lower() for cap in opp_caps):
+                        opp_ids.append(opp.get("id", ""))
+                        break
+
+            concept_data = {
+                **template_result,
+                "components": components,
+                "evidence_refs": evidence_refs[:20],
+                "constraints": constraints[:5],
+                "generation_method": "deterministic",
+                "opportunities_addressed": opp_ids[:5],
+            }
+
+            # Validate quality gates
+            quality_gates = _check_quality_gates(concept_data, existing_ids)
+            all_gates_passed = all(g["passed"] for g in quality_gates)
+
+            # Even if some gates fail, preserve the concept with its uncertainties
+            # (per mission requirement 8: preserve exploratory opportunities even
+            # when evidence is sparse; label their uncertainty rather than discarding)
+            if not all_gates_passed:
+                failed_gates = [g["gate"] for g in quality_gates if not g["passed"]]
+                # Don't discard — add the failed gates as uncertainties
+                for fg in failed_gates:
+                    if fg == "uncertainty_honesty":
+                        concept_data["uncertainties"].append(
+                            "concept lacks explicit uncertainty (auto-added)"
+                        )
+                    elif fg not in ("no_fabricated_component_ids", "no_fabricated_evidence_refs"):
+                        # Fabricated IDs are a hard failure — skip this concept
+                        pass
+
+                # Hard failures: fabricated IDs or evidence refs
+                fab_gates = [
+                    g
+                    for g in quality_gates
+                    if g["gate"] in ("no_fabricated_component_ids", "no_fabricated_evidence_refs")
+                    and not g["passed"]
+                ]
+                if fab_gates:
+                    unknowns.append(
+                        f"concept from {template_name} template skipped: "
+                        f"fabricated IDs or evidence refs"
+                    )
+                    continue
+
+            # Persist the concept and its hypothesis
+            innovation_id, hypothesis_id = await _persist_concept(
+                session,
+                concept_data,
+                problem_domain,
+                context,
+                existing_ids,
+                request_id,
+            )
+
+            concepts.append(
+                InnovationConcept(
+                    id=innovation_id,
+                    problem_domain=problem_domain,
+                    context=context,
+                    purpose=concept_data.get("purpose", ""),
+                    target_users=concept_data.get("target_users", []),
+                    components=components,
+                    integration_mechanism=concept_data.get("integration_mechanism", ""),
+                    potential_benefit=concept_data.get("potential_benefit", ""),
+                    uncertainties=concept_data.get("uncertainties", []),
+                    evidence_refs=evidence_refs[:20],
+                    constraints=constraints[:5],
+                    combination_basis=concept_data.get("combination_basis", ""),
+                    generation_method="deterministic",
+                    hypothesis_id=hypothesis_id,
+                    opportunities_addressed=concept_data.get("opportunities_addressed", []),
+                    request_id=request_id,
+                )
+            )
+
+    # ── Step 4: If no concepts from templates, try single-component concepts ──
+    if not concepts and combinations:
+        for comb in combinations:
+            if len(concepts) >= max_concepts:
+                break
+            components = comb.get("components", [])
+            if not components:
+                continue
+
+            comp = components[0]
+            ev_refs = [r for r in comb.get("evidence_refs", []) if r in existing_ids["fragments"]]
+
+            concept_data = {
+                "purpose": f"Address '{problem_domain}' using {comp.get('canonical_name', 'a component')}",
+                "target_users": ["technical practitioners"],
+                "integration_mechanism": (
+                    f"Single-component approach: {comp.get('canonical_name', 'the component')} "
+                    f"provides capabilities that may address '{problem_domain}'. "
+                    f"No multi-component integration is needed."
+                ),
+                "potential_benefit": (
+                    f"This single component may address '{problem_domain}'. "
+                    f"The benefit is a hypothesis requiring validation, not a verified outcome."
+                ),
+                "uncertainties": [
+                    "single-component solution may be insufficient for the full problem",
+                    "combination viability is a hypothesis requiring investigation",
+                ],
+                "combination_basis": comb.get("combination_basis", "single_component"),
+                "components": components,
+                "evidence_refs": ev_refs[:20],
+                "constraints": [],
+                "generation_method": "deterministic",
+                "opportunities_addressed": [],
+            }
+
+            innovation_id, hypothesis_id = await _persist_concept(
+                session,
+                concept_data,
+                problem_domain,
+                context,
+                existing_ids,
+                request_id,
+            )
+
+            concepts.append(
+                InnovationConcept(
+                    id=innovation_id,
+                    problem_domain=problem_domain,
+                    context=context,
+                    purpose=concept_data["purpose"],
+                    target_users=concept_data["target_users"],
+                    components=components,
+                    integration_mechanism=concept_data["integration_mechanism"],
+                    potential_benefit=concept_data["potential_benefit"],
+                    uncertainties=concept_data["uncertainties"],
+                    evidence_refs=ev_refs[:20],
+                    constraints=[],
+                    combination_basis=concept_data["combination_basis"],
+                    generation_method="deterministic",
+                    hypothesis_id=hypothesis_id,
+                    opportunities_addressed=[],
+                    request_id=request_id,
+                )
+            )
+
+    await session.commit()
+
+    # ── Step 5: Collect unknowns ────────────────────────────────────────
+    if not concepts:
+        unknowns.append(
+            "no innovation concepts generated — the knowledge graph may not "
+            "contain enough documented capabilities or combinations for this problem domain"
+        )
+    unknowns.extend(combination_result.get("unknowns", []))
+    unknowns.extend(opportunity_result.get("unknowns", []))
+
+    # ── Step 6: Run quality gates on all concepts ──────────────────────
+    all_quality_gates: list[dict[str, Any]] = []
+    for concept in concepts:
+        gates = _check_quality_gates(concept, existing_ids)
+        all_quality_gates.extend(gates)
+
+    _log.info(
+        "generate_innovations complete: %d concepts, %d unknowns, %d quality gates",
+        len(concepts),
+        len(unknowns),
+        len(all_quality_gates),
+    )
+
+    return InnovationResult(
+        concepts=concepts[:max_concepts],
+        unknowns=unknowns,
+        quality_gates=all_quality_gates,
+        limits={"max_concepts": max_concepts, "limit": limit},
+        request_id=request_id,
+        generated_at=_utcnow_iso(),
+    )

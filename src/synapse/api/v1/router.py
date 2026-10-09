@@ -8,6 +8,7 @@ from synapse.api.v1 import (
     capabilities,
     capability_registry,
     health,
+    innovations,
     knowledge,
     providers,
     reasoning,
@@ -30,6 +31,9 @@ router.include_router(capability_registry.router)  # G04-T02: capability registr
 router.include_router(
     reasoning.router
 )  # G04-T03: POST /api/v1/reasoning/queries (replaces 501 placeholder)
+router.include_router(
+    innovations.router
+)  # G05-T03: POST /api/v1/innovations/generate (replaces 501 placeholder)
 router.include_router(knowledge.entities_router)
 router.include_router(knowledge.relationships_router)
 router.include_router(knowledge.claims_router)
@@ -70,12 +74,10 @@ def _not_implemented(feature: str):
 # it here as a placeholder -- the real router at router.include_router(
 # reasoning.router) above handles POST /api/v1/reasoning/queries.
 
-_placeholder.add_api_route(
-    "/innovations/generate",
-    _not_implemented("POST /innovations/generate"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# Innovations — POST /innovations/generate is implemented in G05-T03
+# (src/synapse/api/v1/innovations.py). Do not duplicate it here as a placeholder.
+
+
 _placeholder.add_api_route(
     "/innovations/{innovation_id}/critique",
     _not_implemented("POST /innovations/{id}/critique"),

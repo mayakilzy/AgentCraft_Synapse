@@ -471,7 +471,7 @@ After applying the 3 minimal corrections + 14 negative quality-gate
 tests + this review document:
 
 ```
-Final commit SHA (post-T04C): <populated after push>
+Final commit SHA (post-T04C): c891fecaafe8e84e678190060d55ee6488e7d573
 Starting checkpoint (for reference): 6019253f8d8b0559a1690eba4398363a74aabcf8
 ```
 
@@ -522,8 +522,8 @@ Per G04-T04C mission §"Required deliverable":
 | Property | Value |
 |----------|-------|
 | Branch | `main` |
-| Local HEAD | (populated after push) |
-| `origin/main` | (verified equal to local HEAD) |
+| Local HEAD | `c891fecaafe8e84e678190060d55ee6488e7d573` |
+| `origin/main` | `c891fecaafe8e84e678190060d55ee6488e7d573` (verified equal to local HEAD) |
 | Working tree | CLEAN |
 | Stash | empty |
 | Tags | none |

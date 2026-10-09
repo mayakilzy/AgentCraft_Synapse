@@ -35,7 +35,7 @@ of NOT_EVIDENCED). The smallest safe correction was applied: a single
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `4a4b0a6e58ffa4fe03572fb827a5fe1a4fe736bb` |
-| Final commit SHA | (populated after push) |
+| Final commit SHA | `d689f5a792a653dbeec0db87eb2884ab81fbd57b` |
 | Remote synchronization | PASS |
 | Working tree | CLEAN |
 
@@ -229,7 +229,7 @@ PRB-01 through PRB-07 remain unchanged.
 ## 9. Final SHA
 
 ```
-Final commit SHA (post-T02): <populated after push>
+Final commit SHA (post-T02): d689f5a792a653dbeec0db87eb2884ab81fbd57b
 Starting checkpoint (for reference): 4a4b0a6e58ffa4fe03572fb827a5fe1a4fe736bb
 ```
 

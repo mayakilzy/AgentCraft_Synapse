@@ -1,18 +1,29 @@
-"""G05-T01 -- Evidence-Grounded Knowledge Combination Engine.
+"""G05-T01 + G05-T02 -- Evidence-Grounded Knowledge Combination + Opportunity Discovery.
 
 Per the corrected G05 plan (`reports/G05_INNOVATION_IMPLEMENTATION_PLAN.md`
-§G05-T01):
+§G05-T01 and §G05-T02):
 
-  "Given a problem domain, enumerate compatible
+  G05-T01: "Given a problem domain, enumerate compatible
    tool/capability/technique combinations from the knowledge graph,
    each with traceable evidence."
 
-This is **candidate discovery** (Concern 1, §1.1 of the plan), NOT full
-innovation generation. It produces *candidates* — structured
-combinations of existing tools/capabilities/techniques — each with
-traceable evidence, integration mechanism, potential benefit, and
-uncertainties. It does NOT produce application concepts (T03), critiques
-(T04), experiments (T05), or evidence feedback (T06).
+  G05-T02: "Identify underserved needs, technical gaps, and
+   promising combinations — explicitly NOT treating missing evidence
+   as proof of absence."
+
+G05-T01 is **candidate discovery** (Concern 1, §1.1 of the plan): it
+produces *candidates* — structured combinations of existing
+tools/capabilities/techniques — each with traceable evidence,
+integration mechanism, potential benefit, and uncertainties. It does
+NOT produce application concepts (T03), critiques (T04), experiments
+(T05), or evidence feedback (T06).
+
+G05-T02 is **opportunity discovery** (Concern 5, §1.1 of the plan):
+it identifies underserved needs, technical gaps, and promising
+combinations by composing G04's ``analyze_gap()`` classification with
+G05-T01's ``combine_knowledge()`` candidate combinations. An
+opportunity is a grounded possibility worth investigating, NOT proof
+of an unmet market need or a commercially novel product.
 
 Architecture
 ------------
@@ -76,11 +87,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synapse.application.capability_registry import list_capabilities
+from synapse.application.gap_analyzer import (
+    GapClassification,
+    analyze_gap,
+)
 from synapse.application.relationship_service import (
     find_capabilities as find_entity_capabilities,
 )
 from synapse.application.relationship_service import (
     find_limitations,
+    find_missing_capabilities,
 )
 from synapse.application.retrieval import (
     DEFAULT_LIMIT,
@@ -886,3 +902,650 @@ async def _count_distinct_sources(
     rows = (await session.execute(stmt)).all()
     distinct_uris = {row[0] for row in rows if row[0]}
     return len(distinct_uris)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# G05-T02 — Evidence-Grounded Opportunity Discovery
+# ════════════════════════════════════════════════════════════════════════════
+
+#: Maximum opportunities returned by ``discover_opportunities``.
+MAX_OPPORTUNITIES = 20
+
+
+class Opportunity(dict):
+    """A single opportunity — a grounded possibility worth investigating.
+
+    Keys:
+        id: stable identifier (UUID hex prefix).
+        problem_domain: the problem or need being addressed.
+        gap_type: "not_evidenced" | "constrained" | "contested" |
+            "missing_capability" | "combination_gap".
+        gap_description: human-readable explanation of the gap.
+        relevant_capabilities: list of capability names involved.
+        candidate_components: list of ComponentRef dicts from G05-T01
+            combinations that could address this gap.
+        evidence_refs: supporting evidence fragment IDs (validated).
+        constraints: list of constraint dicts (LIMITS/CONTRADICTS/INVALIDATES).
+        uncertainties: list of human-readable uncertainty descriptions (>=1).
+        investigation_direction: proposed next step for investigation.
+        missing_evidence: what evidence is still needed.
+        validation_questions: list of questions that need answering.
+        ranking_rationale: explanation of the rank score.
+        rank_score: float in [0.0, 1.0] (higher = more promising).
+        request_id: per-request tracing.
+    """
+
+
+class OpportunityResult(dict):
+    """Top-level result of ``discover_opportunities``.
+
+    Keys: opportunities[], unknowns[], gap_summary, limits, request_id,
+    generated_at
+    """
+
+
+def _classify_opportunity_type(
+    gap_classification: str,
+    has_missing_caps: bool,
+    has_combination_gap: bool,
+) -> str:
+    """Map a gap classification to an opportunity gap_type.
+
+    Per the plan §G05-T02 acceptance criterion 1: returns >=1 opportunity
+    per gap category (NOT_EVIDENCED, CONSTRAINED, CONTESTED).
+    """
+    if gap_classification == GapClassification.NOT_EVIDENCED.value:
+        return "not_evidenced"
+    if gap_classification == GapClassification.CONSTRAINED.value:
+        return "constrained"
+    if gap_classification == GapClassification.CONTESTED.value:
+        return "contested"
+    if has_missing_caps:
+        return "missing_capability"
+    if has_combination_gap:
+        return "combination_gap"
+    return "unknown"
+
+
+def _compute_investigation_direction(
+    gap_type: str,
+    gap_description: str,
+    candidate_components: list[dict[str, Any]],
+) -> str:
+    """Deterministically compute a proposed investigation direction.
+
+    This is a structured suggestion, NOT a verified plan.
+    """
+    if gap_type == "not_evidenced":
+        return (
+            f"Investigate whether any undocumented tool or technique provides "
+            f"this capability. Search for evidence in related domains. "
+            f"The gap '{gap_description[:80]}' may indicate an underserved need."
+        )
+    if gap_type == "constrained":
+        return (
+            f"Investigate whether the constraint can be relaxed or worked around. "
+            f"Document the constraint's scope and whether alternative tools avoid it. "
+            f"The constraint '{gap_description[:80]}' limits current solutions."
+        )
+    if gap_type == "contested":
+        return (
+            f"Investigate the contradiction to determine which evidence is "
+            f"applicable to the target context. The contradiction "
+            f"'{gap_description[:80]}' needs resolution before adoption."
+        )
+    if gap_type == "missing_capability":
+        return (
+            "Document the missing capability and search for tools that provide it. "
+            "The gap may be an opportunity for a new tool or integration."
+        )
+    if gap_type == "combination_gap":
+        comp_names = [
+            c.get("canonical_name", c.get("entity_id", "?")) for c in candidate_components[:3]
+        ]
+        return (
+            f"Investigate whether the combination of {', '.join(comp_names)} "
+            f"can address the gap. Validate the integration mechanism experimentally."
+        )
+    return "Investigate the gap with further evidence collection."
+
+
+def _compute_missing_evidence(
+    gap_type: str,
+    evidence_refs: list[str],
+    constraints: list[dict[str, Any]],
+) -> list[str]:
+    """Deterministically compute what evidence is still needed."""
+    missing: list[str] = []
+
+    if gap_type == "not_evidenced":
+        missing.append("evidence that any tool provides this capability")
+        missing.append("evidence of the capability's applicability to the target context")
+
+    if gap_type == "constrained":
+        missing.append("evidence that the constraint applies in the target context")
+        missing.append("evidence of alternative tools that avoid the constraint")
+
+    if gap_type == "contested":
+        missing.append("evidence resolving which side of the contradiction is applicable")
+        missing.append("evidence of the contradiction's scope and conditions")
+
+    if len(evidence_refs) < 3:
+        missing.append(f"more supporting evidence (currently {len(evidence_refs)} fragments)")
+
+    if constraints:
+        missing.append(f"evidence addressing {len(constraints)} constraint(s)")
+
+    # Always include at least one missing-evidence item
+    if not missing:
+        missing.append("experimental validation of the opportunity's viability")
+
+    return missing
+
+
+def _compute_validation_questions(
+    gap_type: str,
+    gap_description: str,
+    relevant_capabilities: list[str],
+) -> list[str]:
+    """Deterministically compute validation questions."""
+    questions: list[str] = []
+
+    cap_str = ", ".join(relevant_capabilities[:3]) if relevant_capabilities else "the capability"
+
+    if gap_type == "not_evidenced":
+        questions.append(f"Does any existing tool provide {cap_str}?")
+        questions.append(
+            "Is the absence of evidence due to the capability being new, or just undocumented?"
+        )
+    elif gap_type == "constrained":
+        questions.append("Does the constraint apply in the target context?")
+        questions.append("Can the constraint be relaxed or worked around?")
+    elif gap_type == "contested":
+        questions.append("Which evidence is applicable to the target context?")
+        questions.append("Under what conditions does the contradiction resolve?")
+    elif gap_type == "missing_capability":
+        questions.append(f"What tools or techniques could provide {cap_str}?")
+        questions.append("Is the missing capability a known gap in the ecosystem?")
+    elif gap_type == "combination_gap":
+        questions.append("Do the candidate components integrate effectively?")
+        questions.append("What evidence supports the integration mechanism?")
+
+    # Always include at least one question
+    if not questions:
+        questions.append("What evidence is needed to validate this opportunity?")
+
+    return questions
+
+
+def _rank_opportunity(
+    evidence_count: int,
+    constraint_count: int,
+    component_count: int,
+    gap_type: str,
+) -> tuple[float, str]:
+    """Deterministic ranking score + rationale.
+
+    Returns (score, rationale). Higher score = more promising opportunity.
+
+    Ranking factors:
+    - Evidence count: more existing evidence → higher score (the gap is
+      grounded in real knowledge, not speculation).
+    - Constraint count: more constraints → lower score (the gap is harder
+      to address).
+    - Component count: more candidate components → higher score (more
+      potential solution paths).
+    - Gap type: NOT_EVIDENCED and missing_capability gaps are ranked higher
+      (they represent clear underserved needs); CONTESTED gaps are ranked
+      lower (they need resolution before action).
+
+    No market-demand or novelty scores are fabricated.
+    """
+    # Evidence weight (0-0.4)
+    evidence_score = min(0.4, evidence_count * 0.05)
+    # Constraint penalty (0-0.2, subtracted)
+    constraint_penalty = min(0.2, constraint_count * 0.05)
+    # Component weight (0-0.2)
+    component_score = min(0.2, component_count * 0.05)
+    # Gap-type weight (0-0.4)
+    gap_type_weights = {
+        "not_evidenced": 0.40,
+        "missing_capability": 0.35,
+        "combination_gap": 0.30,
+        "constrained": 0.20,
+        "contested": 0.15,
+        "unknown": 0.10,
+    }
+    gap_score = gap_type_weights.get(gap_type, 0.10)
+
+    raw = evidence_score + component_score + gap_score - constraint_penalty
+    score = max(0.0, min(1.0, raw))
+
+    rationale = (
+        f"evidence_score={evidence_score:.2f} "
+        f"(evidence_count={evidence_count}), "
+        f"component_score={component_score:.2f} "
+        f"(component_count={component_count}), "
+        f"gap_type_score={gap_score:.2f} (gap_type={gap_type}), "
+        f"constraint_penalty={constraint_penalty:.2f} "
+        f"(constraint_count={constraint_count}), "
+        f"final_score={score:.2f}"
+    )
+    return score, rationale
+
+
+async def discover_opportunities(
+    session: AsyncSession,
+    problem_domain: str,
+    *,
+    context: str | None = None,
+    candidate_entity_ids: list[str] | None = None,
+    max_opportunities: int = MAX_OPPORTUNITIES,
+    limit: int = DEFAULT_LIMIT,
+    requester: str | None = None,
+) -> OpportunityResult:
+    """Discover evidence-grounded opportunities for a problem domain.
+
+    Per G05-T02: this identifies underserved needs, technical gaps, and
+    promising combinations by composing G04's ``analyze_gap()``
+    classification with G05-T01's ``combine_knowledge()`` candidate
+    combinations.
+
+    An opportunity is a **grounded possibility worth investigating**, NOT
+    proof of an unmet market need or a commercially novel product.
+
+    Args:
+        session: AsyncSession bound to the Synapse database.
+        problem_domain: the problem or need to explore (max 512 chars).
+        context: optional technical context for applicability matching.
+        candidate_entity_ids: optional list of entity IDs to scope to.
+        max_opportunities: cap on returned opportunities (≤ MAX_OPPORTUNITIES).
+        limit: max number of capabilities to evaluate.
+        requester: optional actor name for audit logging.
+
+    Returns:
+        An ``OpportunityResult`` dict with opportunities[], unknowns[],
+        gap_summary, limits, request_id, generated_at.
+
+    Epistemic safety:
+        - Reuses G04 ``analyze_gap()`` classification (no reimplementation).
+        - Missing evidence is reported as ``unknowns[]``, NOT as "no solution exists".
+        - NOT_EVIDENCED is distinguished from demonstrated absence.
+        - Applicable contradictions are preserved (not suppressed).
+        - Out-of-context contradictions are preserved as metadata.
+        - No market-demand or novelty scores are fabricated.
+        - Hypothesized relationships are excluded (epistemic isolation from G05-T01).
+        - Every opportunity carries >=1 uncertainty and >=1 validation question.
+    """
+    request_id = uuid4().hex
+    max_opportunities = max(1, min(MAX_OPPORTUNITIES, max_opportunities))
+    limit = max(1, min(MAX_LIMIT, limit))
+
+    _log.info(
+        "discover_opportunities problem_domain=%r context=%s candidates=%s max_opportunities=%d",
+        problem_domain[:80],
+        context,
+        candidate_entity_ids,
+        max_opportunities,
+    )
+
+    # ── Validate inputs ──────────────────────────────────────────────────
+    if not problem_domain or not problem_domain.strip():
+        return OpportunityResult(
+            opportunities=[],
+            unknowns=["empty_problem_domain"],
+            gap_summary={},
+            limits={
+                "max_opportunities": max_opportunities,
+                "limit": limit,
+            },
+            request_id=request_id,
+            generated_at=_utcnow_iso(),
+        )
+
+    if len(problem_domain) > MAX_QUERY_CHARS:
+        return OpportunityResult(
+            opportunities=[],
+            unknowns=[f"problem_domain_too_long:{len(problem_domain)}>{MAX_QUERY_CHARS}"],
+            gap_summary={},
+            limits={"max_opportunities": max_opportunities, "limit": limit},
+            request_id=request_id,
+            generated_at=_utcnow_iso(),
+        )
+
+    # ── Collect existing IDs for validation ──────────────────────────────
+    existing_ids = await _collect_existing_ids(session)
+
+    # ── Step 1: Discover all capabilities in the knowledge graph ─────────
+    all_capabilities = await list_capabilities(session, limit=limit)
+    capability_names = [
+        c.get("canonical_name", "")
+        for c in all_capabilities.get("items", [])
+        if c.get("canonical_name")
+    ]
+
+    if not capability_names:
+        return OpportunityResult(
+            opportunities=[],
+            unknowns=["no capabilities documented in the knowledge graph"],
+            gap_summary={"total": 0},
+            limits={"max_opportunities": max_opportunities, "limit": limit},
+            request_id=request_id,
+            generated_at=_utcnow_iso(),
+        )
+
+    # ── Step 2: Run G04 analyze_gap on all capabilities ─────────────────
+    # This reuses G04's classification rules (NOT_EVIDENCED, SUPPORTED,
+    # PARTIALLY_SUPPORTED, CONTESTED, CONSTRAINED, UNKNOWN) rather than
+    # recreating them. We pass context for applicability matching.
+    gap_result = await analyze_gap(
+        session,
+        capability_names,
+        context=context,
+        candidate_entity_ids=candidate_entity_ids,
+        limit=limit,
+        requester=requester or "g05-t02-opportunity",
+    )
+
+    # ── Step 3: Get G05-T01 combinations as candidate solution ingredients ──
+    combination_result = await combine_knowledge(
+        session,
+        problem_domain,
+        context=context,
+        candidate_entity_ids=candidate_entity_ids,
+        max_combinations=MAX_COMBINATIONS,
+        limit=limit,
+        requester=requester or "g05-t02-opportunity",
+    )
+    combinations = combination_result.get("combinations", [])
+
+    # ── Step 4: Build opportunities from gap assessments ─────────────────
+    opportunities: list[Opportunity] = []
+    unknowns: list[str] = []
+    seen_gap_keys: set[str] = set()  # for deduplication
+
+    gap_summary: dict[str, int] = {
+        "total": 0,
+        "not_evidenced": 0,
+        "constrained": 0,
+        "contested": 0,
+        "missing_capability": 0,
+        "combination_gap": 0,
+    }
+
+    for req in gap_result.get("requirements", []):
+        if len(opportunities) >= max_opportunities:
+            break
+
+        classification = req.get("classification", "unknown")
+        cap_name = req.get("required_capability", "unknown")
+        gap_type = _classify_opportunity_type(
+            classification,
+            has_missing_caps=False,  # set below
+            has_combination_gap=False,
+        )
+
+        # Skip SUPPORTED and PARTIALLY_SUPPORTED — they're not gaps
+        if classification in (
+            GapClassification.SUPPORTED.value,
+            GapClassification.PARTIALLY_SUPPORTED.value,
+        ):
+            continue
+
+        # Deduplicate by (gap_type, cap_name)
+        gap_key = f"{gap_type}:{cap_name}"
+        if gap_key in seen_gap_keys:
+            continue
+        seen_gap_keys.add(gap_key)
+
+        # Collect evidence from the gap assessment
+        evidence_refs: list[str] = []
+        for link in req.get("evidence_chain", []):
+            frag_id = link.get("fragment_id")
+            if frag_id and frag_id in existing_ids["fragments"]:
+                evidence_refs.append(frag_id)
+        # Also add contradicting evidence
+        for contra in req.get("contradicting_evidence", []):
+            if contra in existing_ids["fragments"] and contra not in evidence_refs:
+                evidence_refs.append(contra)
+
+        # Collect constraints
+        constraints = req.get("limitations", [])
+
+        # Collect out-of-context contradictions as metadata
+        out_of_context = req.get("out_of_context_contradictions", [])
+
+        # Find candidate components from G05-T01 combinations that
+        # reference this capability
+        candidate_components: list[dict[str, Any]] = []
+        for comb in combinations:
+            for comp in comb.get("components", []):
+                role = comp.get("role", "")
+                if cap_name.lower() in role.lower():
+                    candidate_components.append(comp)
+
+        # Build the gap description
+        reason = req.get("reason", "")
+        gap_description = f"{cap_name}: {reason}" if reason else cap_name
+
+        # Compute uncertainties
+        uncertainties: list[str] = []
+        if classification == GapClassification.NOT_EVIDENCED.value:
+            uncertainties.append(
+                f"no evidence that any tool provides '{cap_name}' — "
+                f"absence of evidence is NOT evidence of absence"
+            )
+        if constraints:
+            uncertainties.append(f"{len(constraints)} documented constraint(s) may limit solutions")
+        if out_of_context:
+            uncertainties.append(
+                f"{len(out_of_context)} out-of-context contradiction(s) preserved as metadata"
+            )
+        if req.get("contradicting_evidence"):
+            uncertainties.append(
+                f"{len(req['contradicting_evidence'])} contradicting evidence fragment(s) — "
+                f"both sides preserved"
+            )
+        # Always include at least one uncertainty
+        if not uncertainties:
+            uncertainties.append("opportunity viability is a hypothesis requiring investigation")
+
+        # Compute investigation direction
+        investigation = _compute_investigation_direction(
+            gap_type, gap_description, candidate_components
+        )
+
+        # Compute missing evidence
+        missing_ev = _compute_missing_evidence(gap_type, evidence_refs, constraints)
+
+        # Compute validation questions
+        validation_qs = _compute_validation_questions(gap_type, gap_description, [cap_name])
+
+        # Compute rank
+        rank_score, rank_rationale = _rank_opportunity(
+            len(evidence_refs),
+            len(constraints),
+            len(candidate_components),
+            gap_type,
+        )
+
+        gap_summary["total"] += 1
+        gap_summary[gap_type] = gap_summary.get(gap_type, 0) + 1
+
+        opportunities.append(
+            Opportunity(
+                id=f"opp-{uuid4().hex[:12]}",
+                problem_domain=problem_domain,
+                gap_type=gap_type,
+                gap_description=gap_description,
+                relevant_capabilities=[cap_name],
+                candidate_components=candidate_components[:5],
+                evidence_refs=evidence_refs[:20],
+                constraints=constraints[:5],
+                uncertainties=uncertainties,
+                investigation_direction=investigation,
+                missing_evidence=missing_ev,
+                validation_questions=validation_qs,
+                ranking_rationale=rank_rationale,
+                rank_score=rank_score,
+                out_of_context_contradictions=out_of_context,
+                request_id=request_id,
+            )
+        )
+
+    # ── Step 5: Add combination-gap opportunities from G05-T01 ───────────
+    # If there are combinations that address capabilities with gaps, create
+    # combination-gap opportunities.
+    for comb in combinations:
+        if len(opportunities) >= max_opportunities:
+            break
+
+        comb_basis = comb.get("combination_basis", "")
+        comb_components = comb.get("components", [])
+
+        # Check if this combination addresses a gap
+        # (i.e., at least one of its components provides a capability that
+        # is NOT_EVIDENCED or CONSTRAINED)
+        addresses_gap = False
+        for opp in opportunities:
+            for comp in comb_components:
+                role = comp.get("role", "")
+                for cap_name in opp.get("relevant_capabilities", []):
+                    if cap_name.lower() in role.lower():
+                        addresses_gap = True
+                        break
+
+        if not addresses_gap:
+            continue
+
+        gap_key = f"combination_gap:{comb.get('id', '')}"
+        if gap_key in seen_gap_keys:
+            continue
+        seen_gap_keys.add(gap_key)
+
+        evidence_refs = [r for r in comb.get("evidence_refs", []) if r in existing_ids["fragments"]]
+        uncertainties = comb.get("uncertainties", [])
+        if not uncertainties:
+            uncertainties.append("combination viability is a hypothesis requiring validation")
+
+        investigation = _compute_investigation_direction(
+            "combination_gap", comb_basis, comb_components
+        )
+        missing_ev = _compute_missing_evidence("combination_gap", evidence_refs, [])
+        validation_qs = _compute_validation_questions(
+            "combination_gap",
+            comb_basis,
+            [c.get("canonical_name", "") for c in comb_components],
+        )
+        rank_score, rank_rationale = _rank_opportunity(
+            len(evidence_refs), 0, len(comb_components), "combination_gap"
+        )
+
+        gap_summary["total"] += 1
+        gap_summary["combination_gap"] = gap_summary.get("combination_gap", 0) + 1
+
+        opportunities.append(
+            Opportunity(
+                id=f"opp-{uuid4().hex[:12]}",
+                problem_domain=problem_domain,
+                gap_type="combination_gap",
+                gap_description=f"Combination may address a gap: {comb_basis}",
+                relevant_capabilities=[comb_basis],
+                candidate_components=comb_components[:5],
+                evidence_refs=evidence_refs[:20],
+                constraints=[],
+                uncertainties=uncertainties,
+                investigation_direction=investigation,
+                missing_evidence=missing_ev,
+                validation_questions=validation_qs,
+                ranking_rationale=rank_rationale,
+                rank_score=rank_score,
+                out_of_context_contradictions=[],
+                request_id=request_id,
+            )
+        )
+
+    # ── Step 6: Add missing-capability opportunities ────────────────────
+    # For each candidate entity, find capabilities it doesn't provide.
+    if candidate_entity_ids:
+        for eid in candidate_entity_ids:
+            if len(opportunities) >= max_opportunities:
+                break
+            if eid not in existing_ids["entities"]:
+                continue
+
+            missing_caps = await find_missing_capabilities(session, eid, limit=10)
+            for mc in missing_caps[:3]:
+                if len(opportunities) >= max_opportunities:
+                    break
+                cap_name = mc.get("capability", "unknown")
+                gap_key = f"missing_capability:{eid}:{cap_name}"
+                if gap_key in seen_gap_keys:
+                    continue
+                seen_gap_keys.add(gap_key)
+
+                uncertainties = [
+                    f"entity '{eid}' does not provide '{cap_name}' — "
+                    f"absence of evidence is NOT evidence of absence",
+                    "investigate whether other tools provide this capability",
+                ]
+                investigation = _compute_investigation_direction("missing_capability", cap_name, [])
+                missing_ev = _compute_missing_evidence("missing_capability", [], [])
+                validation_qs = _compute_validation_questions(
+                    "missing_capability", cap_name, [cap_name]
+                )
+                rank_score, rank_rationale = _rank_opportunity(0, 0, 0, "missing_capability")
+
+                gap_summary["total"] += 1
+                gap_summary["missing_capability"] = gap_summary.get("missing_capability", 0) + 1
+
+                opportunities.append(
+                    Opportunity(
+                        id=f"opp-{uuid4().hex[:12]}",
+                        problem_domain=problem_domain,
+                        gap_type="missing_capability",
+                        gap_description=f"'{eid}' does not provide '{cap_name}'",
+                        relevant_capabilities=[cap_name],
+                        candidate_components=[],
+                        evidence_refs=[],
+                        constraints=[],
+                        uncertainties=uncertainties,
+                        investigation_direction=investigation,
+                        missing_evidence=missing_ev,
+                        validation_questions=validation_qs,
+                        ranking_rationale=rank_rationale,
+                        rank_score=rank_score,
+                        out_of_context_contradictions=[],
+                        request_id=request_id,
+                    )
+                )
+
+    # ── Step 7: Sort by rank_score (desc), then by ID for determinism ───
+    opportunities.sort(key=lambda o: (-o.get("rank_score", 0.0), o.get("id", "")))
+
+    # ── Step 8: Collect unknowns ────────────────────────────────────────
+    if not opportunities:
+        unknowns.append(
+            "no opportunities found — the knowledge graph may not contain "
+            "enough gaps or combinations for this problem domain"
+        )
+    unknowns.extend(gap_result.get("unknowns", []))
+    unknowns.extend(combination_result.get("unknowns", []))
+
+    _log.info(
+        "discover_opportunities complete: %d opportunities, %d unknowns",
+        len(opportunities),
+        len(unknowns),
+    )
+
+    return OpportunityResult(
+        opportunities=opportunities[:max_opportunities],
+        unknowns=unknowns,
+        gap_summary=gap_summary,
+        limits={
+            "max_opportunities": max_opportunities,
+            "limit": limit,
+        },
+        request_id=request_id,
+        generated_at=_utcnow_iso(),
+    )

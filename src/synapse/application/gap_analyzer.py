@@ -316,6 +316,11 @@ async def _find_candidate_provider_links(
             .where(
                 RelationshipRow.to_entity_id == capability_id,
                 RelationshipRow.predicate == predicate,
+                # G05-T01 epistemic-isolation: exclude hypothesized-origin
+                # relationships so they do not contaminate gap analysis.
+                # Only established knowledge (origin IN explicit/derived)
+                # is used for classification.
+                RelationshipRow.origin != "hypothesized",
             )
             .limit(MAX_CANDIDATES)
         )

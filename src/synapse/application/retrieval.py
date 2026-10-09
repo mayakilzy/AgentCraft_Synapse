@@ -668,18 +668,10 @@ def _weighted_score(factors: RerankingFactors) -> float:
 
 # ── Lexical search ───────────────────────────────────────────────────────────
 
-
-def _query_keywords(query: str) -> list[str]:
-    """Split a query into individual keyword tokens for OR-style matching.
-
-    Drops stopwords (the, a, an, of, in, what, is, are, and, or, to, for,
-    with, on, by, be, this, that, these, those) and tokens shorter than 3
-    chars. Returns lowercased keywords in the order they appeared.
-
-    This is intentionally simple -- no stemming, no NLP. It just lets
-    multi-word queries match any of their significant words.
-    """
-    stopwords = {
+#: Common English stopwords removed from query keywords before ILIKE matching.
+#: Module-level so it is constructed once, not on every call to _query_keywords.
+_STOPWORDS: frozenset[str] = frozenset(
+    {
         "the",
         "a",
         "an",
@@ -731,29 +723,25 @@ def _query_keywords(query: str) -> list[str]:
         "might",
         "must",
     }
+)
+
+
+def _query_keywords(query: str) -> list[str]:
+    """Split a query into individual keyword tokens for OR-style matching.
+
+    Drops stopwords (see ``_STOPWORDS``) and tokens shorter than 3 chars.
+    Returns lowercased keywords in the order they appeared. Intentionally
+    simple -- no stemming, no NLP, no embeddings.
+    """
     tokens: list[str] = []
     seen: set[str] = set()
     for tok in query.lower().split():
         tok = tok.strip(".,;:!?\"'()[]{}-")
-        if not tok or len(tok) < 3:
-            continue
-        if tok in stopwords:
-            continue
-        if tok in seen:
+        if not tok or len(tok) < 3 or tok in _STOPWORDS or tok in seen:
             continue
         seen.add(tok)
         tokens.append(tok)
     return tokens
-
-
-def _ilike_pattern(query: str) -> str:
-    """Build an SQL ILIKE pattern from the FULL query (whitespace-normalized).
-
-    Used for exact phrase matching. For multi-keyword OR matching, use
-    ``_query_keywords`` and build separate patterns per keyword.
-    """
-    cleaned = " ".join(query.split())
-    return f"%{cleaned}%"
 
 
 async def _lexical_entity_search(

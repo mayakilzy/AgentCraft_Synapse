@@ -627,6 +627,50 @@ async def test_missing_knowledge_not_proven_absence(app, db_session):
 
 
 @pytest.mark.asyncio
+async def test_multi_token_query_retrieves_relevant_results(app, db_session):
+    """A multi-token query ("hybrid retrieval quality agent systems")
+    must surface claims/entities that match ANY of its significant keywords.
+
+    This is the correctness check for §B.1 of the closure review brief:
+    multi-token queries must retrieve relevant results -- not just the
+    exact-phrase match. The keyword-based lexical search splits the query
+    into tokens (after stopword removal) and matches ANY of them.
+    """
+    await _seed_retrieval_fixture(db_session)
+
+    # Multi-token query -- no entity/claim proposition contains this
+    # exact phrase, but each token appears in some proposition.
+    result = await hybrid_retrieve(db_session, "hybrid retrieval quality agent systems", limit=20)
+
+    # At least one claim must be retrieved (the main claim proposition
+    # contains all five significant keywords: "hybrid", "retrieval",
+    # "quality", "agent", "systems").
+    assert len(result["claims"]) >= 1, f"multi-token query returned no claims: {result['unknowns']}"
+
+    # The top claim must have non-zero text_relevance (multi-token match
+    # was successful). Note: when two claims share the same evidence
+    # fragment, they can legitimately tie on text_relevance; we check the
+    # general invariant rather than a specific ordering.
+    top = result["claims"][0]
+    assert top["reranking_factors"]["text_relevance"] > 0.0, (
+        f"text_relevance should be > 0 for multi-token match: "
+        f"{top['reranking_factors']['text_relevance']}"
+    )
+
+    # At least one of the high-relevance claims must be present.
+    retrieved_ids = {c["claim"]["id"] for c in result["claims"]}
+    assert "claim-main" in retrieved_ids or "claim-dep" in retrieved_ids, (
+        f"neither claim-main nor claim-dep retrieved: {retrieved_ids}"
+    )
+
+    # At least one entity should also be retrieved.
+    assert len(result["entities"]) >= 1
+
+
+# ── Test 8b: Original citation-chain integrity test ─────────────────────────
+
+
+@pytest.mark.asyncio
 async def test_citation_chain_integrity(app, db_session):
     """Every evidence-backed claim result has a traversable citation chain:
     claim → fragment_id → spans → source_uri."""

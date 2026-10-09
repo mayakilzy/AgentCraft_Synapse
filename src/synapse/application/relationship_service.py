@@ -265,11 +265,28 @@ async def find_related_entities(
     predicate: str | None = None,
     direction: str = "outgoing",
     limit: int = 50,
+    include_hypothesized: bool = False,
 ) -> list[dict[str, Any]]:
     """Find entities related to a given entity.
 
     Returns a list of dicts with:
       {"entity": EntityRow fields, "relationship": RelationshipRow fields}
+
+    G05-T01 epistemic-isolation correction (per G05-P00C plan §4.4):
+    By default, hypothesized-origin relationships
+    (``RelationshipRow.origin == 'hypothesized'``) are EXCLUDED from
+    results so they do not contaminate ordinary established-knowledge
+    retrieval. Callers that explicitly want hypothesized relationships
+    (e.g., G05 innovation endpoints surfacing proposed combinations)
+    must pass ``include_hypothesized=True``.
+
+    This is the smallest safe correction: it adds a keyword parameter
+    with a conservative default (False) that preserves the existing
+    behavior for established-knowledge callers while excluding
+    hypothesized relationships by default. The existing G04 callers
+    (``find_capabilities``, ``find_dependencies``, ``find_alternatives``,
+    ``find_limitations``, ``find_missing_capabilities``) inherit the
+    default and thus exclude hypothesized relationships automatically.
     """
     stmt = select(RelationshipRow, EntityRow)
 
@@ -279,6 +296,8 @@ async def find_related_entities(
         )
         if predicate:
             stmt_out = stmt_out.where(RelationshipRow.predicate == predicate)
+        if not include_hypothesized:
+            stmt_out = stmt_out.where(RelationshipRow.origin != "hypothesized")
         stmt_out = stmt_out.limit(limit)
         result_out = await session.execute(stmt_out)
         outgoing = [
@@ -302,6 +321,8 @@ async def find_related_entities(
         )
         if predicate:
             stmt_in = stmt_in.where(RelationshipRow.predicate == predicate)
+        if not include_hypothesized:
+            stmt_in = stmt_in.where(RelationshipRow.origin != "hypothesized")
         stmt_in = stmt_in.limit(limit)
         result_in = await session.execute(stmt_in)
         incoming = [

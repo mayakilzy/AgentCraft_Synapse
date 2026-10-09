@@ -115,7 +115,7 @@ requests for the same concept (documented as LIMITED).
 ## 6. Final SHA
 
 ```
-Final commit SHA (post-T03C): <populated after push>
+Final commit SHA (post-T03C): d1974e4e3b1c7e4376fd1c49ca7aea2243ed9611
 Starting checkpoint (for reference): 4d512da647ed166608683f6c89965cd3c5e6c412
 ```
 

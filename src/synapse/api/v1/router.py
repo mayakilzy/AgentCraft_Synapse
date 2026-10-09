@@ -74,16 +74,10 @@ def _not_implemented(feature: str):
 # it here as a placeholder -- the real router at router.include_router(
 # reasoning.router) above handles POST /api/v1/reasoning/queries.
 
-# Innovations — POST /innovations/generate is implemented in G05-T03
-# (src/synapse/api/v1/innovations.py). Do not duplicate it here as a placeholder.
+# Innovations — POST /innovations/generate and POST /innovations/{id}/critique
+# are implemented in G05-T03 + G05-T04 (src/synapse/api/v1/innovations.py).
+# Do not duplicate them here as placeholders.
 
-
-_placeholder.add_api_route(
-    "/innovations/{innovation_id}/critique",
-    _not_implemented("POST /innovations/{id}/critique"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
 
 # Experiments / hypotheses
 _placeholder.add_api_route(

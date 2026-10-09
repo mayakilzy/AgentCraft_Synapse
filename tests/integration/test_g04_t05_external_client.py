@@ -746,11 +746,11 @@ async def test_11_predictable_error_responses(app, client, db_session, auth_head
     assert body["error"]["code"] == "not_found"
 
     # 501 not implemented (placeholder route).
-    # Note: /innovations/generate was activated in G05-T03; it now returns 200.
-    # The remaining placeholder routes (/innovations/{id}/critique, /experiments, etc.)
-    # still return 501.
+    # Note: /innovations/generate was activated in G05-T03;
+    # /innovations/{id}/critique was activated in G05-T04.
+    # The remaining placeholder routes (/experiments, etc.) still return 501.
     r = client.post(
-        "/api/v1/innovations/{innovation_id}/critique".replace("{innovation_id}", "test-id"),
+        "/api/v1/experiments",
         headers=auth_headers_reader,
         json={},
     )
@@ -803,9 +803,9 @@ def test_12_stable_openapi_schema_generation(app):
         for p in required_legacy_paths:
             assert p in paths, f"OpenAPI missing legacy path: {p}"
         # Placeholder routes still present (G05+ not yet activated).
-        # Note: /innovations/generate was activated in G05-T03.
+        # Note: /innovations/generate (G05-T03) and /innovations/{id}/critique (G05-T04)
+        # are now real endpoints.
         placeholder_paths = [
-            "/api/v1/innovations/{innovation_id}/critique",
             "/api/v1/experiments",
             "/api/v1/hypotheses/{hypothesis_id}/evidence-deltas",
             "/api/v1/future/scenarios",

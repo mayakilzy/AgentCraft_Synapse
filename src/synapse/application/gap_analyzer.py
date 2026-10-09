@@ -348,12 +348,46 @@ async def _collect_capability_evidence_fragments(
     session: AsyncSession,
     capability_id: str,
     provider_links: list[dict[str, Any]],
+    *,
+    candidate_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[ClaimRow]]:
-    """Collect all assessed claims + their assessments for this capability.
+    """Collect assessed claims + their assessments for this capability.
+
+    When ``candidate_ids`` is provided, claims are filtered to those
+    attributed to one of the candidates (per the G04-T02C provider-
+    attribution safeguard). A claim is "attributed to" a candidate if
+    the non-capability endpoint of the claim is one of the candidates.
+
+    Pattern 1: ``claim.subject_ref == candidate_id`` AND
+              ``claim.object_ref == capability_id``
+              (the candidate is the provider/subject, the capability is
+              the object)
+
+    Pattern 2: ``claim.subject_ref == capability_id`` AND
+              ``claim.object_ref == candidate_id``
+              (the candidate is the recipient/object)
+
+    Claims with ``subject_ref=None`` or ``object_ref=None`` are NOT
+    attributed to any candidate (ambiguous attribution -> conservative
+    classification, per G04-T02C §6).
+
+    When ``candidate_ids`` is None, no filtering is applied (the analysis
+    is at the capability level: "is this capability supported by anyone?").
 
     Returns (assessments_with_claim_info, claims).
     """
     claims = await _find_capability_claims(session, capability_id)
+
+    # G04-T02C provider-attribution safeguard: when candidates are named,
+    # filter claims to those attributed to one of the candidates. A
+    # capability-level claim about an unrelated provider must NOT count
+    # as evidence for the selected candidate's support (per mission §5).
+    if candidate_ids is not None:
+        candidate_id_set = set(candidate_ids)
+        claims = [
+            c for c in claims if _claim_attributed_to_candidate(c, capability_id, candidate_id_set)
+        ]
+
     assessments: list[dict[str, Any]] = []
     for c in claims:
         assessment = await _get_latest_assessment(session, c.id)
@@ -369,6 +403,45 @@ async def _collect_capability_evidence_fragments(
             }
         )
     return assessments, claims
+
+
+def _claim_attributed_to_candidate(
+    claim: ClaimRow,
+    capability_id: str,
+    candidate_id_set: set[str],
+) -> bool:
+    """Whether a claim is attributed to one of the candidate providers.
+
+    Per G04-T02C mission §4-5: a SUPPORTED result for a named candidate
+    must require a valid, evidence-grounded association between that
+    candidate and the capability. A capability-level claim about an
+    unrelated provider must NOT count as evidence for the selected
+    candidate's support.
+
+    A claim is "attributed to" a candidate if the non-capability endpoint
+    of the claim is one of the candidates:
+
+      Pattern 1 (subject is the provider):
+          claim.subject_ref in candidate_id_set
+          AND claim.object_ref == capability_id
+
+      Pattern 2 (object is the provider, capability is the subject):
+          claim.subject_ref == capability_id
+          AND claim.object_ref in candidate_id_set
+
+    Claims with no subject_ref (or no object_ref when capability is the
+    subject) are NOT attributed to any candidate. This is the
+    "conservative classification when attribution is ambiguous" rule
+    (per G04-T02C §6).
+    """
+    subj = claim.subject_ref
+    obj = claim.object_ref
+
+    # Pattern 1: subject is the candidate, object is the capability.
+    # Pattern 2: subject is the capability, object is the candidate.
+    return (subj is not None and subj in candidate_id_set and obj == capability_id) or (
+        subj == capability_id and obj is not None and obj in candidate_id_set
+    )
 
 
 def _positive_outcome(outcome: str | None) -> bool:
@@ -587,8 +660,12 @@ async def _assess_single_requirement(
         )
 
     # ── 3. Collect claims + assessments for this capability.
+    # G04-T02C: pass candidate_ids so claims are filtered by attribution
+    # to one of the candidates. A capability-level claim about an
+    # unrelated provider must NOT count as evidence for the selected
+    # candidate's support.
     assessments_with_claim, _ = await _collect_capability_evidence_fragments(
-        session, capability_id, provider_links
+        session, capability_id, provider_links, candidate_ids=candidate_ids
     )
 
     # ── 4. Collect limitations on this capability.

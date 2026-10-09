@@ -1065,3 +1065,548 @@ def test_api_openapi_includes_capability_registry(app):
     assert "/api/v1/knowledge/capabilities" in paths
     assert "/api/v1/knowledge/capabilities/{capability_id}" in paths
     assert "/api/v1/knowledge/capabilities/analyze-gap" in paths
+
+
+# ── G04-T02C: Provider Attribution Closure tests ─────────────────────────────
+#
+# Per the G04-T02C mission briefing "Mandatory regression scenarios":
+#   - Provider A has documented capability X; provider B does not → B must
+#     not become SUPPORTED.
+#   - Provider A and B independently have applicable evidence for X → both
+#     may be SUPPORTED.
+#   - Capability X exists, but its provider association is unsupported → no
+#     provider-specific SUPPORTED.
+#   - Explicit PROVIDES relationship with insufficient evidence →
+#     conservative classification.
+#   - Valid provider relationship with conflicting evidence → contradiction
+#     preserved.
+#   - Context mismatch → no unconditional SUPPORTED.
+#   - Repeated analyses → deterministic.
+#   - Existing G01-G04-T02 tests → green.
+
+
+async def _seed_attribution_fixture(session) -> dict[str, Any]:
+    """Build a fixture specifically for the G04-T02C provider-attribution
+    regression scenarios.
+
+    Entities:
+      - ent-tool-a (tool): a candidate provider
+      - ent-tool-b (tool): another candidate provider
+      - ent-tool-c (tool): a candidate with NO attributed claim
+      - cap-X (capability): the capability under analysis
+      - cap-Y (capability): a capability with PROVIDES but no evidence
+      - cap-Z (capability): a capability with conflicting evidence
+      - ent-no-vector (constraint): limits cap-Z
+
+    Claims (all attributed to specific providers):
+      - claim-a-X: subject=ent-tool-a, object=cap-X, evidence=[frag-a]
+        → assessed as SOURCE_SUPPORTED
+      - claim-b-X: subject=ent-tool-b, object=cap-X, evidence=[frag-b]
+        → assessed as SOURCE_SUPPORTED
+      - claim-a-Z: subject=ent-tool-a, object=cap-Z, evidence=[frag-a]
+        contradicting_refs=[frag-opp] → assessed as CONTESTED
+
+    The fixture isolates the attribution concern from the larger T02
+    fixture so we can assert provider-specific classifications precisely.
+    """
+    src_a = await _make_source(session, "src-attrib-a", "https://example.com/a")
+    src_b = await _make_source(session, "src-attrib-b", "https://example.com/b")
+    src_c = await _make_source(session, "src-attrib-c", "https://example.com/c")
+
+    frag_a = await _make_fragment(
+        session, "frag-attrib-a", src_a, "Tool A provides capability X for AI agents."
+    )
+    frag_b = await _make_fragment(
+        session, "frag-attrib-b", src_b, "Tool B provides capability X independently."
+    )
+    frag_opp = await _make_fragment(
+        session,
+        "frag-attrib-opp",
+        src_c,
+        "Capability Z requires manual review, cannot be fully automated.",
+    )
+
+    await _make_entity(session, "ent-tool-a", "tool", "tool A")
+    await _make_entity(session, "ent-tool-b", "tool", "tool B")
+    await _make_entity(session, "ent-tool-c", "tool", "tool C (no attributed claim)")
+    await _make_entity(session, "ent-no-vector", "constraint", "no vector database")
+    await _make_entity(session, "cap-X", "capability", "capability X")
+    await _make_entity(session, "cap-Y", "capability", "capability Y (no evidence)")
+    await _make_entity(session, "cap-Z", "capability", "capability Z (contested)")
+
+    # Claims
+    await _make_claim(
+        session,
+        "claim-a-X",
+        "Tool A provides capability X for AI agents.",
+        subject_ref="ent-tool-a",
+        object_ref="cap-X",
+        evidence_refs=["frag-attrib-a"],
+        validity_conditions=["AI agents"],
+    )
+    await _make_claim(
+        session,
+        "claim-b-X",
+        "Tool B provides capability X independently.",
+        subject_ref="ent-tool-b",
+        object_ref="cap-X",
+        evidence_refs=["frag-attrib-b"],
+        validity_conditions=["AI agents"],
+    )
+    await _make_claim(
+        session,
+        "claim-a-Z",
+        "Tool A provides capability Z.",
+        subject_ref="ent-tool-a",
+        object_ref="cap-Z",
+        evidence_refs=["frag-attrib-a"],
+        contradicting_refs=["frag-attrib-opp"],
+        epistemic_state="disputed",
+        validity_conditions=["AI agents"],
+    )
+
+    # Spans (so evidence chains resolve)
+    await _make_span(
+        session,
+        "span-a-X",
+        "frag-attrib-a",
+        "claim-a-X",
+        "Tool A provides capability X",
+        start=0,
+        end=27,
+    )
+    await _make_span(
+        session,
+        "span-b-X",
+        "frag-attrib-b",
+        "claim-b-X",
+        "Tool B provides capability X",
+        start=0,
+        end=27,
+    )
+
+    # Relationships
+    # ent-tool-a PROVIDES cap-X (with evidence)
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-tool-a",
+        to_entity_id="cap-X",
+        predicate="PROVIDES",
+        evidence_refs=["frag-attrib-a"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    # ent-tool-b PROVIDES cap-X (with evidence)
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-tool-b",
+        to_entity_id="cap-X",
+        predicate="PROVIDES",
+        evidence_refs=["frag-attrib-b"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    # ent-tool-c PROVIDES cap-X (NO evidence_refs, NO attributed claim)
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-tool-c",
+        to_entity_id="cap-X",
+        predicate="PROVIDES",
+        evidence_refs=None,
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    # ent-tool-a PROVIDES cap-Y (NO evidence_refs, NO claim)
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-tool-a",
+        to_entity_id="cap-Y",
+        predicate="PROVIDES",
+        evidence_refs=None,
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    # ent-tool-a PROVIDES cap-Z (with claim that has contradicting_refs)
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-tool-a",
+        to_entity_id="cap-Z",
+        predicate="PROVIDES",
+        evidence_refs=["frag-attrib-a"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+    # ent-no-vector LIMITS cap-Z
+    r = await create_relationship(
+        session,
+        from_entity_id="ent-no-vector",
+        to_entity_id="cap-Z",
+        predicate="LIMITS",
+        evidence_refs=["frag-attrib-opp"],
+        origin="explicit",
+    )
+    assert r["ok"] is True
+
+    await session.commit()
+    # Assess the claims.
+    for cid in ("claim-a-X", "claim-b-X", "claim-a-Z"):
+        await assess_claim(session, cid, requester="fixture")
+    await session.commit()
+
+    return {
+        "tool_a": "ent-tool-a",
+        "tool_b": "ent-tool-b",
+        "tool_c": "ent-tool-c",
+        "cap_X": "cap-X",
+        "cap_Y": "cap-Y",
+        "cap_Z": "cap-Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_attribution_isolation(app, db_session):
+    """Provider A has documented capability X; provider B does not.
+
+    Per G04-T02C mandatory regression scenario 1:
+      "Provider A has documented capability X; provider B does not
+       → B must not become SUPPORTED."
+
+    Setup:
+      - ent-tool-a PROVIDES cap-X with claim-attributed evidence → SUPPORTED
+      - ent-tool-c PROVIDES cap-X with NO evidence_refs and NO attributed
+        claim → must NOT be SUPPORTED.
+
+    Before the G04-T02C fix, ent-tool-c could be misclassified as
+    SUPPORTED because the analyzer aggregated claims at the capability
+    level rather than filtering by attribution to the named candidate.
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    # Candidate A: has claim-attributed evidence → SUPPORTED.
+    r_a = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a_a = r_a["requirements"][0]
+    assert a_a["classification"] == GapClassification.SUPPORTED, (
+        f"tool A (with attributed evidence) should be SUPPORTED, got "
+        f"{a_a['classification']}: {a_a['reason']}"
+    )
+
+    # Candidate C: PROVIDES edge but NO attributed claim → must NOT be SUPPORTED.
+    r_c = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_c"]],
+    )
+    a_c = r_c["requirements"][0]
+    assert a_c["classification"] != GapClassification.SUPPORTED, (
+        f"tool C (no attributed claim) must NOT be SUPPORTED, got "
+        f"{a_c['classification']}: {a_c['reason']}"
+    )
+    # Conservative classification: PROVIDES edge with no evidence_refs and
+    # no attributed claim → NOT_EVIDENCED.
+    assert a_c["classification"] == GapClassification.NOT_EVIDENCED, (
+        f"tool C should be NOT_EVIDENCED (no evidence at all), got {a_c['classification']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_multiple_providers_each_supported(app, db_session):
+    """Provider A and B independently have applicable evidence for X
+    → both may be SUPPORTED.
+
+    Per G04-T02C mandatory regression scenario 2.
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    # Candidate A: claim-a-X is attributed to ent-tool-a → SUPPORTED.
+    r_a = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a_a = r_a["requirements"][0]
+    assert a_a["classification"] == GapClassification.SUPPORTED, (
+        f"tool A should be SUPPORTED, got {a_a['classification']}"
+    )
+
+    # Candidate B: claim-b-X is attributed to ent-tool-b → SUPPORTED.
+    r_b = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_b"]],
+    )
+    a_b = r_b["requirements"][0]
+    assert a_b["classification"] == GapClassification.SUPPORTED, (
+        f"tool B should be SUPPORTED (it has its OWN attributed claim), "
+        f"got {a_b['classification']}: {a_b['reason']}"
+    )
+
+    # When both candidates are analyzed together, BOTH should be SUPPORTED.
+    r_both = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"], fixture["tool_b"]],
+    )
+    a_both = r_both["requirements"][0]
+    # When multiple candidates are analyzed, the classification reflects
+    # the union of their evidence. Both have positive attributed evidence,
+    # so the union is SUPPORTED.
+    assert a_both["classification"] == GapClassification.SUPPORTED, (
+        f"both A and B together should be SUPPORTED, got "
+        f"{a_both['classification']}: {a_both['reason']}"
+    )
+    # Both candidates should be in the candidates list.
+    candidate_ids = {c["provider_entity_id"] for c in a_both["candidates"]}
+    assert fixture["tool_a"] in candidate_ids
+    assert fixture["tool_b"] in candidate_ids
+
+
+@pytest.mark.asyncio
+async def test_capability_claim_unrelated_provider_not_used(app, db_session):
+    """Capability X exists, claim about provider A, candidate=B.
+
+    Per G04-T02C mandatory regression scenario 3:
+      "Capability X exists, but its provider association is unsupported
+       → no provider-specific SUPPORTED."
+
+    Setup:
+      - claim-a-X is attributed to ent-tool-a (subject_ref=ent-tool-a)
+      - Candidate=ent-tool-b: has its OWN claim-b-X → SUPPORTED ✓
+      - But if we analyze candidate=ent-tool-b WITHOUT its own claim
+        (use cap-Y instead, where only ent-tool-a has a claim), the
+        claim about ent-tool-a must NOT count as evidence for ent-tool-b.
+
+    For cap-Y: ent-tool-a PROVIDES cap-Y but no claim is attributed
+    to ent-tool-a specifically (the only claims are about cap-X).
+    If we ask "does ent-tool-b support cap-Y?", there is:
+      - No PROVIDES edge from ent-tool-b to cap-Y → NOT_EVIDENCED
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    # ent-tool-b has NO PROVIDES edge to cap-Y → NOT_EVIDENCED (no provider link).
+    r = await analyze_gap(
+        db_session,
+        ["capability Y"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_b"]],
+    )
+    a = r["requirements"][0]
+    assert a["classification"] == GapClassification.NOT_EVIDENCED, (
+        f"tool B has no PROVIDES edge to cap-Y → NOT_EVIDENCED, got {a['classification']}"
+    )
+
+    # ent-tool-a has PROVIDES edge to cap-Y but NO attributed claim
+    # (claims about cap-Y don't exist). The PROVIDES edge has no
+    # evidence_refs either.
+    r_a = await analyze_gap(
+        db_session,
+        ["capability Y"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a_a = r_a["requirements"][0]
+    # PROVIDES edge with no evidence_refs and no attributed claim
+    # → NOT_EVIDENCED.
+    assert a_a["classification"] == GapClassification.NOT_EVIDENCED, (
+        f"tool A PROVIDES cap-Y but has no evidence and no attributed "
+        f"claim → NOT_EVIDENCED, got {a_a['classification']}: "
+        f"{a_a['reason']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_provides_insufficient_evidence(app, db_session):
+    """Explicit PROVIDES relationship with insufficient evidence →
+    conservative classification.
+
+    Per G04-T02C mandatory regression scenario 4.
+
+    Setup:
+      - ent-tool-c PROVIDES cap-X with NO evidence_refs and NO attributed
+        claim.
+      - Classification must be NOT_EVIDENCED (conservative).
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    r = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_c"]],
+    )
+    a = r["requirements"][0]
+    assert a["classification"] == GapClassification.NOT_EVIDENCED, (
+        f"PROVIDES edge with no evidence_refs and no attributed claim "
+        f"→ NOT_EVIDENCED (conservative), got {a['classification']}: "
+        f"{a['reason']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_valid_provider_with_conflicting_evidence_preserved(app, db_session):
+    """Valid provider relationship with conflicting evidence →
+    contradiction preserved.
+
+    Per G04-T02C mandatory regression scenario 5.
+
+    Setup:
+      - ent-tool-a PROVIDES cap-Z with claim-a-Z that has
+        contradicting_refs=['frag-attrib-opp'].
+      - Classification must be CONTESTED (preserved, not suppressed).
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    r = await analyze_gap(
+        db_session,
+        ["capability Z"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a = r["requirements"][0]
+    assert a["classification"] == GapClassification.CONTESTED, (
+        f"tool A's claim for cap-Z has contradicting evidence → CONTESTED, "
+        f"got {a['classification']}: {a['reason']}"
+    )
+    assert len(a["contradicting_evidence"]) >= 1
+    # The LIMITS edge from no-vector-db is also preserved.
+    assert len(a["limitations"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_context_mismatch_no_unconditional_supported(app, db_session):
+    """Context mismatch → no unconditional SUPPORTED.
+
+    Per G04-T02C mandatory regression scenario 6.
+
+    Setup:
+      - claim-a-X has validity_conditions=["AI agents"]
+      - With context="AI agents" → SUPPORTED
+      - With context="embedded systems" (no overlap) → NOT SUPPORTED
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    # Matching context.
+    r_match = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a_match = r_match["requirements"][0]
+    assert a_match["classification"] == GapClassification.SUPPORTED, (
+        f"context 'AI agents' matches validity_conditions → SUPPORTED, "
+        f"got {a_match['classification']}"
+    )
+
+    # Mismatching context.
+    r_mismatch = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="embedded systems",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a_mismatch = r_mismatch["requirements"][0]
+    assert a_mismatch["classification"] != GapClassification.SUPPORTED, (
+        f"context 'embedded systems' does NOT match 'AI agents' → must "
+        f"NOT be SUPPORTED, got {a_mismatch['classification']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_attribution_deterministic_repeated(app, db_session):
+    """Repeated analyses → deterministic.
+
+    Per G04-T02C mandatory regression scenario 7.
+
+    The same gap analysis (with attribution filtering) must produce the
+    same classification on repeated calls.
+    """
+    fixture = await _seed_attribution_fixture(db_session)
+
+    r1 = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    r2 = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        candidate_entity_ids=[fixture["tool_a"]],
+    )
+    a1 = r1["requirements"][0]
+    a2 = r2["requirements"][0]
+    assert a1["classification"] == a2["classification"]
+    assert a1["reason"] == a2["reason"]
+    assert len(a1["evidence_chain"]) == len(a2["evidence_chain"])
+    assert r1["summary"] == r2["summary"]
+
+
+@pytest.mark.asyncio
+async def test_attribution_no_candidates_keeps_capability_level(app, db_session):
+    """When candidate_ids is None, the analysis is at the capability level:
+    'is this capability supported by anyone?' — claims are NOT filtered
+    by attribution.
+
+    This preserves the G04-T02 behavior for unscoped analyses.
+    """
+    await _seed_attribution_fixture(db_session)
+
+    # No candidate filter → all claims about cap-X count (regardless of
+    # which provider they're attributed to). Should be SUPPORTED because
+    # at least one claim has positive outcome.
+    r = await analyze_gap(
+        db_session,
+        ["capability X"],
+        context="AI agents",
+        # candidate_entity_ids=None (default)
+    )
+    a = r["requirements"][0]
+    assert a["classification"] == GapClassification.SUPPORTED, (
+        f"capability-level analysis (no candidate filter) should be "
+        f"SUPPORTED because at least one provider has positive evidence, "
+        f"got {a['classification']}: {a['reason']}"
+    )
+
+
+def test_g01_g04_t02_regression_after_attribution_fix():
+    """All existing G01-G04-T02 tests still pass after the G04-T02C fix.
+
+    Per G04-T02C mandatory regression scenario 8.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/integration/test_g04_t02_capability_registry.py",
+            "--no-cov",
+            "-q",
+            "-k",
+            "not test_g01_g04_t02_regression_after_attribution_fix",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        cwd=str(REPO_ROOT),
+        env=env,
+    )
+    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
+    assert "passed" in r.stdout

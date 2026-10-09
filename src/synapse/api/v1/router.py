@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from synapse.api.v1 import capabilities, health, knowledge, providers, sources, system
+from synapse.api.v1 import capabilities, health, knowledge, providers, retrieval, sources, system
 
 # Health endpoints live at root level (/health/*) per DOMAIN_AND_API_CONTRACTS.md
 # — they're system probes, not API content.
@@ -15,6 +15,7 @@ router.include_router(capabilities.router)
 router.include_router(providers.router)
 router.include_router(sources.router)
 router.include_router(knowledge.router)
+router.include_router(retrieval.router)  # G04-T01: POST /api/v1/knowledge/retrieve
 router.include_router(knowledge.entities_router)
 router.include_router(knowledge.relationships_router)
 router.include_router(knowledge.claims_router)

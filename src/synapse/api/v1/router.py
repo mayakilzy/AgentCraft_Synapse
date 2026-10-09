@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from synapse.api.v1 import capabilities, health, providers, sources, system
+from synapse.api.v1 import capabilities, health, knowledge, providers, sources, system
 
 # Health endpoints live at root level (/health/*) per DOMAIN_AND_API_CONTRACTS.md
 # — they're system probes, not API content.
@@ -14,6 +14,10 @@ router = APIRouter(prefix="/api/v1")
 router.include_router(capabilities.router)
 router.include_router(providers.router)
 router.include_router(sources.router)
+router.include_router(knowledge.router)
+router.include_router(knowledge.entities_router)
+router.include_router(knowledge.relationships_router)
+router.include_router(knowledge.claims_router)
 router.include_router(system.router)
 router.include_router(system.jobs_router)
 
@@ -43,45 +47,10 @@ def _not_implemented(feature: str):
 # These routes are no longer placeholders; do not duplicate them here.
 
 
-# Entities / relationships / claims
-_placeholder.add_api_route(
-    "/entities",
-    _not_implemented("GET /entities"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/entities/{entity_id}",
-    _not_implemented("GET /entities/{id}"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/relationships",
-    _not_implemented("GET /relationships"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/relationships/{relationship_id}",
-    _not_implemented("GET /relationships/{id}"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/claims/{claim_id}/evidence",
-    _not_implemented("GET /claims/{id}/evidence"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# Entities / relationships / claims / knowledge search — implemented
+# in G03-T05 (src/synapse/api/v1/knowledge.py). No longer placeholders.
 
-# Knowledge / reasoning / innovations
-_placeholder.add_api_route(
-    "/knowledge/search",
-    _not_implemented("POST /knowledge/search"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# Knowledge search — implemented in G03-T05. No longer placeholder.
 _placeholder.add_api_route(
     "/reasoning/queries",
     _not_implemented("POST /reasoning/queries"),

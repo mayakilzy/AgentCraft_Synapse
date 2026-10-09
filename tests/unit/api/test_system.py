@@ -50,13 +50,12 @@ def test_future_routes_return_501(client, auth_headers_reader):
     """All routes declared in DOMAIN_AND_API_CONTRACTS.md but NOT YET
     implemented must return 501, not 200, per START_HERE §10.
 
-    The G02 minimal slice implemented the /sources/* routes, so they
-    are excluded from this list (they return 200/422, not 501).
+    The G02 minimal slice implemented the /sources/* routes.
+    The G03-T05 slice implemented the /entities, /relationships,
+    /claims/{id}/evidence, and /knowledge/search routes.
+    These are excluded from the 501 list.
     """
     paths = [
-        ("GET", "/api/v1/entities"),
-        ("GET", "/api/v1/relationships"),
-        ("POST", "/api/v1/knowledge/search"),
         ("POST", "/api/v1/reasoning/queries"),
         ("POST", "/api/v1/innovations/generate"),
         ("POST", "/api/v1/experiments"),

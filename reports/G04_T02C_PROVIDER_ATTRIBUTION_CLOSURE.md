@@ -536,7 +536,7 @@ new blockers.
 After applying the attribution safeguard + 9 new tests:
 
 ```
-Final commit SHA (post-T02C): <populated after `git commit` and `git push`>
+Final commit SHA (post-T02C): 022d10a667c8c1153ee9318da5c5ebc413f37504
 Starting checkpoint (for reference): 100eac361db3a862f87b257f462347fdbd0f4c16
 ```
 

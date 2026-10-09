@@ -51,7 +51,7 @@ explicitly caveats graph uniqueness as NOT market novelty.
 | Property | Value |
 |----------|-------|
 | Starting checkpoint | `283570d37ad2117bebc0b6df0ad4133a689a21f5` |
-| Final commit SHA | (populated after push) |
+| Final commit SHA | `8a0a7535283cd61df943779fe80d5e91ced80222` |
 | Remote synchronization | PASS |
 | Working tree | CLEAN |
 
@@ -132,7 +132,7 @@ explicitly caveats graph uniqueness as NOT market novelty.
 ## 8. Final SHA
 
 ```
-Final commit SHA (post-T04): <populated after push>
+Final commit SHA (post-T04): 8a0a7535283cd61df943779fe80d5e91ced80222
 Starting checkpoint (for reference): 283570d37ad2117bebc0b6df0ad4133a689a21f5
 ```
 

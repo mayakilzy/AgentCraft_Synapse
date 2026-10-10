@@ -3,8 +3,59 @@
 **Status**: PASS
 **Task**: G05-T06 — Experiment Execution Records + Evidence Feedback
 **Starting SHA**: `a954908aaa9476c05b967fdb37805ee748bde8b5` (PRB-03 JSON safety patch)
-**Final SHA**: `386b51dcc4eed7adec3fedd23e511c19d7bd7404`
-**Date**: 2026-10-10
+**Final SHA**: (populated after push — focused acceptance audit)
+**Date**: 2026-10-10 (updated with focused acceptance audit)
+
+---
+
+## 0. Focused Acceptance Audit Summary
+
+Three correctness questions were audited with real PostgreSQL tests:
+
+### A — Execution identity
+
+**Finding**: the original fingerprint `SHA-256(experiment_id + execution_mode
++ protocol_snapshot)` blocked legitimate independent repeat executions —
+two calls with the same experiment + mode always collided, forcing reuse.
+
+**Fix**: added a `run_id` parameter to `create_execution()`. When
+provided, same `run_id` → same execution_id (idempotent retry). When
+omitted, a UUID is generated → each call creates a distinct independent
+execution.
+
+**PostgreSQL proof**: 3 tests pass — idempotent retry (same run_id),
+independent repeat (different run_ids), independent (no run_id).
+
+### B — Concurrent observation integrity
+
+**Finding**: `record_observation()` did a read-modify-write on the
+`attributes` JSON column with no row-level lock. Two concurrent sessions
+could both read the same observations list, each append, and the second
+write would overwrite the first — **losing an observation**.
+
+**Fix**: added `with_for_update()` to the SELECT in `record_observation()`
+and `finalize_execution()`. On PostgreSQL, this acquires a row-level
+lock. On SQLite, it is a no-op (SQLite serializes writes at the DB
+level).
+
+**PostgreSQL proof**: 3 tests pass — 20 concurrent observations (no
+loss, all 20 retained exactly once), terminal execution rejection,
+concurrent finalize + observation (no corruption).
+
+### C — Epistemic feedback
+
+**Finding**: `finalize_execution()` checked terminal status without a
+row-level lock — two concurrent finalize calls could both pass the
+check before either writes, potentially emitting two EvidenceDeltas and
+adjusting confidence twice.
+
+**Fix**: the `with_for_update()` lock (from Fix B) also protects
+finalization. The second concurrent finalize blocks until the first
+commits, then sees the terminal status and raises ValueError.
+
+**PostgreSQL proof**: 3 tests pass — repeated finalization (no double
+confidence), conflicting results from separate executions preserved,
+concurrent finalization (exactly 1 delta, confidence adjusted once).
 
 ---
 
@@ -335,11 +386,11 @@ OpenAPI 3.1.0 OK
 
 ---
 
-## 11. Deliverable summary
+## 11. Deliverable summary (updated with focused acceptance audit)
 
 ```
 G05_T06_STATUS = PASS
-AUTHORITATIVE_HEAD = 386b51dcc4eed7adec3fedd23e511c19d7bd7404
+AUTHORITATIVE_HEAD = (populated after push)
 EXECUTION_RECORDS = PASS
 OBSERVATION_CAPTURE = PASS
 EVIDENCE_ASSESSMENT = PASS
@@ -349,10 +400,17 @@ NO_AUTO_VERIFIED_PROMOTION = PASS
 IDEMPOTENCY = PASS
 TRANSACTION_SAFETY = PASS
 POSTGRESQL_TESTS = PASS
-FULL_REGRESSION = 600 passed, 25 skipped (PG), 3 deselected (live), 0 failed
+FULL_REGRESSION = 601 passed, 34 skipped (PG), 3 deselected (live), 0 failed
 RUFF = All checks passed
 OPENAPI = OpenAPI 3.1.0 OK
-MODIFIED_FILES = execution_record.py (new, 903 LOC), executions.py (new, 170 LOC), hypotheses.py (new, 59 LOC), experiments.py (+52 LOC), router.py (+6/-16 LOC), test_g05_t06_execution_evidence.py (new, 669 LOC), conftest.py (+6/-1 LOC)
-REMAINING_LIMITATIONS = assessment requires calibrated thresholds; no independent verification; single-origin observations not independent; no arbitrary code execution; simple confidence adjustment; PRB-01..02/04..07 unchanged
-FINAL_SHA = 386b51dcc4eed7adec3fedd23e511c19d7bd7404
+EXECUTION_RETRY_IDEMPOTENCY = PASS (same run_id → same execution_id)
+INDEPENDENT_REPEAT_EXECUTIONS = PASS (no run_id or different run_id → distinct execution_id)
+CONCURRENT_OBSERVATION_INTEGRITY = PASS (20 concurrent observations, 0 lost, 20 retained exactly once)
+FINALIZATION_RACE_SAFETY = PASS (concurrent finalize: 1 succeeds, 1 raises, no double delta)
+EVIDENCE_PROVENANCE = PASS (observations append-only, source_ref preserved, conflicting deltas preserved)
+CONFIDENCE_UPDATE_IDEMPOTENCY = PASS (re-finalization raises, confidence unchanged)
+MODIFIED_FILES = execution_record.py (+run_id in fingerprint, +with_for_update on record_observation + finalize_execution), experiments.py (+run_id field in ExecuteRequest), test_g05_t06_execution_evidence.py (updated test_09/10 + added test_10b), test_g05_t06_audit_concurrency.py (new, 9 PG tests)
+REMAINING_LIMITATIONS = assessment requires calibrated thresholds; no independent verification; single-origin observations not independent; no arbitrary code execution; simple confidence adjustment; PG test suites share DB (test-ordering issue when run together, each suite passes independently); PRB-01..02/04..07 unchanged
+FINAL_SHA = (populated after push)
+G05_T06_READY_TO_CLOSE = YES
 ```

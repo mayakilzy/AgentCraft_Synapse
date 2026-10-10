@@ -187,6 +187,16 @@ class ExecuteRequest(BaseModel):
             "experiment plan's execution_mode is used."
         ),
     )
+    run_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional run identifier for idempotent retry. If provided, "
+            "the same run_id always produces the same execution_id "
+            "(idempotent). If omitted, each call creates a distinct "
+            "independent execution."
+        ),
+    )
 
 
 @router.post("/{experiment_id}/execute", status_code=status.HTTP_200_OK)
@@ -216,6 +226,7 @@ async def execute_experiment(
             session,
             experiment_id,
             execution_mode=body.execution_mode,
+            run_id=body.run_id,
             requester=str(principal),
         )
     except ValueError as exc:

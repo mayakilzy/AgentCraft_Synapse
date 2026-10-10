@@ -134,15 +134,26 @@ def _compute_execution_fingerprint(
     experiment_id: str,
     execution_mode: str,
     protocol_snapshot: str,
+    run_id: str,
 ) -> str:
     """SHA-256 fingerprint for idempotent execution creation.
 
-    The fingerprint includes the experiment_id, execution_mode, and a
-    normalized protocol snapshot. Same inputs → same execution_id.
-    Different inputs → different execution_id (no false reuse).
+    The fingerprint includes the experiment_id, execution_mode, a
+    normalized protocol snapshot, and a run_id.
+
+    - **Idempotent retry**: if the caller passes the same ``run_id``
+      (e.g. derived from a request idempotency key), the fingerprint
+      is the same → same execution_id → idempotent reuse.
+    - **Independent repeat execution**: if the caller omits
+      ``run_id`` (or passes a unique one), each call gets a distinct
+      fingerprint → distinct execution_id → independent execution.
+
+    This distinguishes "retry the same request" from "start a new
+    independent execution of the same experiment" (per T06 audit
+    question A).
     """
     normalized_protocol = " ".join(protocol_snapshot.lower().split())
-    payload = "\n".join([experiment_id, execution_mode, normalized_protocol])
+    payload = "\n".join([experiment_id, execution_mode, normalized_protocol, run_id])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -168,6 +179,7 @@ async def create_execution(
     experiment_id: str,
     *,
     execution_mode: str | None = None,
+    run_id: str | None = None,
     requester: str | None = None,
 ) -> dict[str, Any] | None:
     """Create an execution record for an existing experiment plan.
@@ -178,6 +190,10 @@ async def create_execution(
             kind="experiment").
         execution_mode: optional override for the execution mode. If
             omitted, the experiment plan's execution_mode is used.
+        run_id: optional run identifier for idempotent retry. If
+            provided, the same run_id always produces the same
+            execution_id (idempotent). If omitted, a UUID is generated
+            — each call creates a distinct independent execution.
         requester: optional actor name for audit logging.
 
     Returns:
@@ -206,11 +222,15 @@ async def create_execution(
     mode = execution_mode or plan_mode
     protocol_snapshot = plan.get("protocol", "")
 
+    # ── run_id: if omitted, generate a unique one (independent execution) ──
+    effective_run_id = run_id if run_id else uuid4().hex
+
     # ── Compute fingerprint + atomically claim it (PRB-03 reuse) ──────
     fingerprint = _compute_execution_fingerprint(
         experiment_id=experiment_id,
         execution_mode=mode,
         protocol_snapshot=protocol_snapshot,
+        run_id=effective_run_id,
     )
     execution_id = f"exec-{fingerprint[:16]}"
     claim_id = f"efp-{execution_id}"
@@ -249,6 +269,7 @@ async def create_execution(
         "experiment_id": experiment_id,
         "hypothesis_id": hypothesis_id,
         "execution_mode": mode,
+        "run_id": effective_run_id,
         "status": ExecutionStatus.CREATED,
         "started_at": _utcnow_iso(),
         "completed_at": None,
@@ -352,10 +373,20 @@ async def record_observation(
     exist. Raises ``ValueError`` if the metric is invalid or the
     execution is terminal.
     """
-    # ── Load the execution ────────────────────────────────────────────
-    stmt = select(EntityRow).where(
-        EntityRow.id == execution_id,
-        EntityRow.kind == "execution",
+    # ── Load the execution with a row-level lock (FOR UPDATE) ────────
+    # This prevents concurrent read-modify-write races on the attributes
+    # JSON column. On PostgreSQL, with_for_update() acquires a row-level
+    # lock. On SQLite, it is a no-op (SQLite serializes writes at the DB
+    # level). Without this lock, two concurrent sessions could both read
+    # the same observations list, each append their observation, and the
+    # second write would overwrite the first — losing an observation.
+    stmt = (
+        select(EntityRow)
+        .where(
+            EntityRow.id == execution_id,
+            EntityRow.kind == "execution",
+        )
+        .with_for_update()
     )
     entity = (await session.execute(stmt)).scalar_one_or_none()
     if entity is None:
@@ -690,10 +721,20 @@ async def finalize_execution(
           are updated ONLY when a delta is emitted.
         - Prior observations are preserved (append-only).
     """
-    # ── Load the execution ────────────────────────────────────────────
-    stmt = select(EntityRow).where(
-        EntityRow.id == execution_id,
-        EntityRow.kind == "execution",
+    # ── Load the execution with a row-level lock (FOR UPDATE) ────────
+    # This prevents concurrent finalization races: without the lock,
+    # two concurrent finalize calls could both pass the terminal-status
+    # check before either writes, potentially emitting two
+    # EvidenceDeltas and adjusting confidence twice. The lock
+    # serializes finalization — the second caller blocks until the
+    # first commits, then sees the terminal status and raises.
+    stmt = (
+        select(EntityRow)
+        .where(
+            EntityRow.id == execution_id,
+            EntityRow.kind == "execution",
+        )
+        .with_for_update()
     )
     entity = (await session.execute(stmt)).scalar_one_or_none()
     if entity is None:

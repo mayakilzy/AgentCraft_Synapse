@@ -392,8 +392,9 @@ async def test_08_insufficient_evidence(app, db_session):
 @pytest.mark.asyncio
 async def test_09_duplicate_equivalent_submission(app, db_session):
     fixture = await _seed_t06_fixture(db_session)
-    r1 = await create_execution(db_session, fixture["experiment_id"])
-    r2 = await create_execution(db_session, fixture["experiment_id"])
+    # Same run_id → idempotent reuse
+    r1 = await create_execution(db_session, fixture["experiment_id"], run_id="run-001")
+    r2 = await create_execution(db_session, fixture["experiment_id"], run_id="run-001")
     assert r1 is not None and r2 is not None
     assert r1["execution_id"] == r2["execution_id"]
     assert r1["was_reused"] is False
@@ -406,13 +407,34 @@ async def test_09_duplicate_equivalent_submission(app, db_session):
 @pytest.mark.asyncio
 async def test_10_conflicting_idempotency_payload(app, db_session):
     fixture = await _seed_t06_fixture(db_session)
-    # Same experiment but different execution_mode → different fingerprint
-    r1 = await create_execution(db_session, fixture["experiment_id"], execution_mode="dry_run")
-    r2 = await create_execution(db_session, fixture["experiment_id"], execution_mode="sandbox")
+    # Same experiment, same run_id, but different execution_mode → different fingerprint
+    r1 = await create_execution(db_session, fixture["experiment_id"], execution_mode="dry_run", run_id="run-X")
+    r2 = await create_execution(db_session, fixture["experiment_id"], execution_mode="sandbox", run_id="run-X")
     assert r1 is not None and r2 is not None
     assert r1["execution_id"] != r2["execution_id"]
     assert r1["execution_mode"] == "dry_run"
     assert r2["execution_mode"] == "sandbox"
+
+
+# ── Test 10b: Independent repeat executions (no run_id → unique) ───────────
+
+
+@pytest.mark.asyncio
+async def test_10b_independent_repeat_executions(app, db_session):
+    """Without a run_id, each create_execution call creates a distinct
+    independent execution of the same experiment. This supports legitimate
+    repeated executions for independent confirmation."""
+    fixture = await _seed_t06_fixture(db_session)
+    r1 = await create_execution(db_session, fixture["experiment_id"])
+    r2 = await create_execution(db_session, fixture["experiment_id"])
+    assert r1 is not None and r2 is not None
+    assert r1["execution_id"] != r2["execution_id"], (
+        "Independent executions (no run_id) must produce distinct execution_ids"
+    )
+    assert r1["was_reused"] is False
+    assert r2["was_reused"] is False
+    # Both reference the same experiment
+    assert r1["experiment_id"] == r2["experiment_id"]
 
 
 # ── Test 11: Failed execution and rollback ────────────────────────────────

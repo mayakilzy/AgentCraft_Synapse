@@ -55,14 +55,43 @@ def test_future_routes_return_501(client, auth_headers_reader):
     /claims/{id}/evidence, and /knowledge/search routes.
     The G04-T03 slice implemented the /reasoning/queries route.
     The G05-T03 slice implemented the /innovations/generate route.
+    The G05-T05 slice implemented the /experiments POST + GET routes.
     These are excluded from the 501 list.
     """
     paths = [
         # POST /api/v1/reasoning/queries was implemented in G04-T03.
         # POST /api/v1/innovations/generate was implemented in G05-T03.
-        ("POST", "/api/v1/experiments"),
+        # POST /api/v1/experiments + GET /api/v1/experiments/{id} were
+        # implemented in G05-T05.
         ("POST", "/api/v1/future/scenarios"),
     ]
     for method, path in paths:
         r = client.request(method, path, headers=auth_headers_reader)
         assert r.status_code == 501, f"{method} {path} → {r.status_code}"
+
+
+def test_experiments_post_is_active(client, auth_headers_reader):
+    """G05-T05 activated POST /api/v1/experiments.
+
+    A request with no body must return 422 (validation error), NOT 501 --
+    this proves the route is implemented and reachable.
+    """
+    r = client.post("/api/v1/experiments", headers=auth_headers_reader)
+    assert r.status_code == 422, f"POST /experiments → {r.status_code}"
+    body = r.json()
+    assert body["error"]["code"] == "validation_error"
+
+
+def test_experiments_get_is_active(client, auth_headers_reader):
+    """G05-T05 activated GET /api/v1/experiments/{id}.
+
+    A request for a non-existent ID must return 404, NOT 501 -- this
+    proves the route is implemented and reachable.
+    """
+    r = client.get(
+        "/api/v1/experiments/exp-does-not-exist",
+        headers=auth_headers_reader,
+    )
+    assert r.status_code == 404, f"GET /experiments/{{id}} → {r.status_code}"
+    body = r.json()
+    assert body["error"]["code"] == "not_found"

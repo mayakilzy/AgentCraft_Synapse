@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from synapse.api.v1 import (
     capabilities,
     capability_registry,
+    experiments,
     health,
     innovations,
     knowledge,
@@ -34,6 +35,9 @@ router.include_router(
 router.include_router(
     innovations.router
 )  # G05-T03: POST /api/v1/innovations/generate (replaces 501 placeholder)
+router.include_router(
+    experiments.router
+)  # G05-T05: POST /api/v1/experiments + GET /api/v1/experiments/{id}
 router.include_router(knowledge.entities_router)
 router.include_router(knowledge.relationships_router)
 router.include_router(knowledge.claims_router)
@@ -80,22 +84,14 @@ def _not_implemented(feature: str):
 
 
 # Experiments / hypotheses
-_placeholder.add_api_route(
-    "/experiments",
-    _not_implemented("POST /experiments"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# POST /experiments and GET /experiments/{id} are implemented in G05-T05
+# (src/synapse/api/v1/experiments.py). Do not duplicate them here as
+# placeholders.
+
 _placeholder.add_api_route(
     "/experiments/{experiment_id}/execute",
     _not_implemented("POST /experiments/{id}/execute"),
     methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/experiments/{experiment_id}",
-    _not_implemented("GET /experiments/{id}"),
-    methods=["GET"],
     status_code=status.HTTP_501_NOT_IMPLEMENTED,
 )
 _placeholder.add_api_route(

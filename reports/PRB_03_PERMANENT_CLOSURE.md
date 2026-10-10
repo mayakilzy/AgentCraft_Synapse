@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: PRB-03 — Minimal Persistence Hardening + Real PostgreSQL Concurrency Proof
 **Starting SHA**: `a64521260baf6981f514711f9be42b6e1e9a4a2f` (G05-T05C closure)
-**Final SHA**: (populated after push)
+**Final SHA**: `053b052d578651803e2a68f0a51ab1f4bfdb83b0`
 **Date**: 2026-10-10
 **PostgreSQL version**: 17.11 (Debian 17.11-0+deb13u1), x86_64-pc-linux-gnu, gcc 14.2.0
 
@@ -463,7 +463,7 @@ work.
 ## 13. Deliverable summary
 
 ```
-FINAL_SHA = (populated after push)
+FINAL_SHA = 053b052d578651803e2a68f0a51ab1f4bfdb83b0
 PRB_03_STATUS = PASS
 POSTGRESQL_REAL_TEST = PASS
 CONCURRENT_IDENTICAL_CREATES = PASS

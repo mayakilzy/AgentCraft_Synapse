@@ -32,30 +32,81 @@ pytestmark = pytest.mark.skipif(
 
 REPO_ROOT = "/home/z/my-project/repos/AgentCraft_Synapse"
 
+# Track databases created by this module so we can drop them at session end.
+_MIG_DBS_CREATED: list[str] = []
 
-def _reset_db():
-    """Drop + recreate synapse_test on PG. Forces termination of any
-    lingering connections first."""
+
+def _parse_pg_url(url: str) -> dict[str, str]:
+    """Parse a SQLAlchemy PostgreSQL URL into its components."""
+    import re
+
+    m = re.match(
+        r"^(?P<driver>postgresql\+psycopg)://"
+        r"(?P<user>[^:@/]+)(?::(?P<password>[^@/]*))?@"
+        r"(?P<host>[^:/]+):(?P<port>\d+)"
+        r"/(?P<dbname>.+)$",
+        url,
+    )
+    if not m:
+        raise ValueError(f"Cannot parse PG_TEST_URL: {url!r}")
+    return m.groupdict()
+
+
+def _admin_sync_url() -> str:
+    parts = _parse_pg_url(PG_TEST_URL)
+    return f"postgresql+psycopg://{parts['user']}@{parts['host']}:{parts['port']}/postgres"
+
+
+def _sync_url_for(dbname: str) -> str:
+    parts = _parse_pg_url(PG_TEST_URL)
+    return f"postgresql+psycopg://{parts['user']}@{parts['host']}:{parts['port']}/{dbname}"
+
+
+def _create_isolated_legacy_db(label: str) -> str:
+    """Create a fresh isolated PostgreSQL database for one migration-safety
+    fixture, apply migrations 0001-0004 only, and return the sync URL.
+
+    Each fixture (pg_clean_legacy, pg_duplicate_legacy,
+    pg_malformed_json_legacy) gets its own database. This replaces the
+    previous ``_reset_db()`` which dropped + recreated the shared
+    ``synapse_test`` database and destroyed schema + data for every
+    other PG test file running in the same suite.
+    """
+    import secrets as _secrets
+
     import psycopg
 
+    safe_label = "".join(c if c.isalnum() or c == "_" else "_" for c in label)[:40]
+    dbname = f"synapse_mig_{safe_label}_{_secrets.token_hex(4)}"
+
+    parts = _parse_pg_url(PG_TEST_URL)
     admin = psycopg.connect(
-        "host=127.0.0.1 port=5433 user=synapse dbname=postgres", autocommit=True
+        f"host={parts['host']} port={parts['port']} user={parts['user']} dbname=postgres",
+        autocommit=True,
     )
     try:
-        # Terminate any lingering connections to synapse_test
         admin.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname='synapse_test' AND pid <> pg_backend_pid()"
+            "WHERE datname = %s AND pid <> pg_backend_pid()",
+            (dbname,),
         )
-        admin.execute("DROP DATABASE IF EXISTS synapse_test")
-        admin.execute("CREATE DATABASE synapse_test")
+        admin.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+        admin.execute(f'CREATE DATABASE "{dbname}"')
     finally:
         admin.close()
 
+    # Apply migrations 0001-0004 (NOT head — the test will apply 0005)
+    db_url = _sync_url_for(dbname)
+    r = _run_alembic(db_url, "upgrade", "0004_relationships")
+    assert r.returncode == 0, f"alembic upgrade 0004 failed for {dbname}: {r.stderr}"
 
-def _alembic_env() -> dict:
+    _MIG_DBS_CREATED.append(dbname)
+    return db_url
+
+
+def _alembic_env(db_url: str) -> dict:
     env = dict(os.environ)
-    env["SYNAPSE_DB_URL"] = PG_TEST_URL
+    env["SYNAPSE_DB_URL"] = db_url
     env["SYNAPSE_ENV"] = "development"
     env["SYNAPSE_AUTH_MODE"] = "development"
     env["SYNAPSE_CORS_ORIGINS"] = "http://localhost:3000"
@@ -67,11 +118,17 @@ def _alembic_env() -> dict:
     return env
 
 
-def _run_alembic(*args: str) -> subprocess.CompletedProcess:
+def _run_alembic(db_url: str, *args: str) -> subprocess.CompletedProcess:
+    """Run an alembic command against the given database URL.
+
+    The URL must point at an isolated database (NOT the shared
+    ``synapse_test``). Each fixture creates its own database via
+    ``_create_isolated_legacy_db``.
+    """
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
-        env=_alembic_env(),
+        env=_alembic_env(db_url),
         capture_output=True,
         text=True,
         timeout=90,
@@ -216,46 +273,40 @@ def _seed_legacy_with_malformed_json(sync_url: str):
 
 @pytest.fixture()
 def pg_clean_legacy():
-    """Fresh PG DB + migrations 0001-0004 + clean legacy data (no duplicates)."""
-    _reset_db()
-    r = _run_alembic("upgrade", "0004_relationships")
-    assert r.returncode == 0, f"alembic upgrade 0004 failed: {r.stderr}"
-    _seed_legacy_clean(
-        "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
-    )
-    yield "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
+    """Isolated PG DB + migrations 0001-0004 + clean legacy data (no duplicates).
+
+    Each fixture call gets its own physical database (synapse_mig_clean_<rand>)
+    so that migration-safety tests never contaminate other PG test files
+    running in the same suite.
+    """
+    db_url = _create_isolated_legacy_db("clean")
+    _seed_legacy_clean(db_url)
+    yield db_url
 
 
 @pytest.fixture()
 def pg_duplicate_legacy():
-    """Fresh PG DB + migrations 0001-0004 + legacy data WITH duplicates."""
-    _reset_db()
-    r = _run_alembic("upgrade", "0004_relationships")
-    assert r.returncode == 0, f"alembic upgrade 0004 failed: {r.stderr}"
-    _seed_legacy_with_duplicates(
-        "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
-    )
-    yield "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
+    """Isolated PG DB + migrations 0001-0004 + legacy data WITH duplicates."""
+    db_url = _create_isolated_legacy_db("duplicate")
+    _seed_legacy_with_duplicates(db_url)
+    yield db_url
 
 
 @pytest.fixture()
 def pg_malformed_json_legacy():
-    """Fresh PG DB + migrations 0001-0004 + legacy data with malformed JSON
+    """Isolated PG DB + migrations 0001-0004 + legacy data with malformed JSON
     that passes the old regex but fails genuine JSON validation."""
-    _reset_db()
-    r = _run_alembic("upgrade", "0004_relationships")
-    assert r.returncode == 0, f"alembic upgrade 0004 failed: {r.stderr}"
-    _seed_legacy_with_malformed_json(
-        "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
-    )
-    yield "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
+    db_url = _create_isolated_legacy_db("malformed")
+    _seed_legacy_with_malformed_json(db_url)
+    yield db_url
 
 
 class TestMigrationBackfill:
     """Verify existing entities are correctly backfilled (clean data)."""
 
     def test_backfill_creates_fingerprint_rows(self, pg_clean_legacy):
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_clean_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
         assert r.returncode == 0, f"migration failed: {r.stderr}"
 
         eng = create_engine(pg_clean_legacy)
@@ -313,7 +364,8 @@ class TestLegacyDuplicateHandling:
 
     def test_duplicate_fingerprints_cause_migration_failure(self, pg_duplicate_legacy):
         """The migration MUST fail with a diagnostic when duplicates exist."""
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_duplicate_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
 
         # The migration MUST fail
         assert r.returncode != 0, (
@@ -333,7 +385,8 @@ class TestLegacyDuplicateHandling:
         """When the migration fails on duplicates, the migration is
         rolled back fully by Alembic (transactional DDL). No
         entity_fingerprints table exists, and no legacy data is lost."""
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_duplicate_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
         assert r.returncode != 0
 
         eng = create_engine(pg_duplicate_legacy)
@@ -374,7 +427,8 @@ class TestMigrationRollback:
 
     def test_migration_is_idempotent(self, pg_clean_legacy):
         """Re-running the migration does not introduce duplicates."""
-        r1 = _run_alembic("upgrade", "head")
+        db_url = pg_clean_legacy
+        r1 = _run_alembic(db_url, "upgrade", "head")
         assert r1.returncode == 0, f"first migration failed: {r1.stderr}"
 
         eng = create_engine(pg_clean_legacy)
@@ -385,7 +439,7 @@ class TestMigrationRollback:
         eng.dispose()
 
         # Run again (alembic sees we're at head, does nothing)
-        r2 = _run_alembic("upgrade", "head")
+        r2 = _run_alembic(db_url, "upgrade", "head")
         assert r2.returncode == 0
 
         eng = create_engine(pg_clean_legacy)
@@ -401,7 +455,8 @@ class TestMigrationRollback:
 
     def test_downgrade_drops_table_cleanly(self, pg_clean_legacy):
         """Downgrade drops entity_fingerprints without affecting other tables."""
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_clean_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
         assert r.returncode == 0, f"upgrade failed: {r.stderr}"
 
         eng = create_engine(pg_clean_legacy)
@@ -415,7 +470,7 @@ class TestMigrationRollback:
             assert "entity_fingerprints" in tables_before
         eng.dispose()
 
-        r_down = _run_alembic("downgrade", "0004_relationships")
+        r_down = _run_alembic(db_url, "downgrade", "0004_relationships")
         assert r_down.returncode == 0, f"downgrade failed: {r_down.stderr}"
 
         eng = create_engine(pg_clean_legacy)
@@ -459,7 +514,8 @@ class TestEntityReferenceIntegrity:
     """Verify existing entity references and relationships remain intact."""
 
     def test_legacy_claims_and_relationships_survive_migration(self, pg_clean_legacy):
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_clean_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
         assert r.returncode == 0, f"migration failed: {r.stderr}"
 
         eng = create_engine(pg_clean_legacy)
@@ -507,7 +563,8 @@ class TestMalformedJSONHandling:
         """Malformed JSON that passes the OLD regex (e.g. '{"name": }')
         MUST be detected by the GENUINE JSON validation and cause the
         migration to fail with a diagnostic."""
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_malformed_json_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
 
         # The migration MUST fail
         assert r.returncode != 0, (
@@ -536,7 +593,8 @@ class TestMalformedJSONHandling:
         are backfilled (fail-closed, not partial). The valid entity is
         NOT backfilled either — the operator must fix the malformed JSON
         first."""
-        r = _run_alembic("upgrade", "head")
+        db_url = pg_malformed_json_legacy
+        r = _run_alembic(db_url, "upgrade", "head")
         assert r.returncode != 0
 
         eng = create_engine(pg_malformed_json_legacy)
@@ -581,8 +639,9 @@ class TestMalformedJSONHandling:
     def test_valid_json_still_backfills_after_malformed_fixed(self, pg_malformed_json_legacy):
         """After fixing the malformed JSON (replacing with valid JSON),
         the migration succeeds and backfills all entities."""
+        db_url = pg_malformed_json_legacy
         # First attempt fails (malformed JSON present)
-        r1 = _run_alembic("upgrade", "head")
+        r1 = _run_alembic(db_url, "upgrade", "head")
         assert r1.returncode != 0
 
         # Fix the malformed JSON entities — replace their attributes with valid JSON
@@ -598,7 +657,7 @@ class TestMalformedJSONHandling:
         eng.dispose()
 
         # Second attempt should succeed
-        r2 = _run_alembic("upgrade", "head")
+        r2 = _run_alembic(db_url, "upgrade", "head")
         assert r2.returncode == 0, (
             f"Migration should succeed after fixing malformed JSON. "
             f"Output: {r2.stderr}"

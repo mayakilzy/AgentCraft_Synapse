@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 PG_TEST_URL = os.environ.get("SYNAPSE_PG_TEST_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -29,33 +29,23 @@ pytestmark = pytest.mark.skipif(
 RECENT_ISO = (datetime.now(UTC) - timedelta(days=10)).isoformat()
 CONCURRENCY = 20
 
-
-@pytest.fixture(scope="module")
-def pg_engine():
-    eng = create_async_engine(PG_TEST_URL, future=True, pool_pre_ping=True)
-    yield eng
-    import asyncio
-
-    asyncio.get_event_loop().run_until_complete(_cleanup(eng))
+# pg_engine is now provided by tests/integration/conftest.py and is bound
+# to an ISOLATED per-module database (synapse_t_<label>_<random>). This
+# file no longer creates its own engine or cleans up shared tables.
 
 
-async def _cleanup(eng):
+async def _seed_fixture(eng):
+    """Seed a minimal fixture and generate an innovation + experiment plan.
+
+    The cleanup at the top is retained so that re-running within the same
+    module-scoped DB (e.g. if a test is retried) starts from a clean
+    slate. With per-module DB isolation this is belt-and-braces.
+    """
     async with eng.begin() as conn:
         for table in [
             "entity_fingerprints", "relationships", "source_spans",
             "claims", "evidence_fragments", "entities", "sources",
             "audit_events", "jobs", "idempotency_keys",
-        ]:
-            await conn.execute(text(f"DELETE FROM {table}"))
-    await eng.dispose()
-
-
-async def _seed_fixture(eng):
-    """Seed a minimal fixture and generate an innovation + experiment plan."""
-    async with eng.begin() as conn:
-        for table in [
-            "entity_fingerprints", "relationships", "source_spans",
-            "claims", "evidence_fragments", "entities", "sources",
         ]:
             await conn.execute(text(f"DELETE FROM {table}"))
 

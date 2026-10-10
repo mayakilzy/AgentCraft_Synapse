@@ -27,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 PG_TEST_URL = os.environ.get("SYNAPSE_PG_TEST_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -36,13 +36,23 @@ pytestmark = pytest.mark.skipif(
 
 RECENT_ISO = (datetime.now(UTC) - timedelta(days=10)).isoformat()
 
+# pg_engine is now provided by tests/integration/conftest.py and is bound
+# to an ISOLATED per-module database (synapse_t_<label>_<random>). This
+# file no longer creates its own engine or cleans up shared tables.
+
 
 async def _seed_minimal_fixture(eng):
-    """Seed a minimal, fixed knowledge snapshot for determinism testing."""
+    """Seed a minimal, fixed knowledge snapshot for determinism testing.
+
+    The cleanup at the top is retained so that re-running within the same
+    module-scoped DB starts from a clean slate. With per-module DB
+    isolation this is belt-and-braces.
+    """
     async with eng.begin() as conn:
         for table in [
             "entity_fingerprints", "relationships", "source_spans",
             "claims", "evidence_fragments", "entities", "sources",
+            "audit_events", "jobs", "idempotency_keys",
         ]:
             await conn.execute(text(f"DELETE FROM {table}"))
 
@@ -135,27 +145,6 @@ async def _assess_claims(eng):
         for cid in ("claim-det-sd", "claim-det-ce", "claim-det-ev"):
             await assess_claim(session, cid, requester="det-fixture")
         await session.commit()
-
-
-@pytest.fixture(scope="module")
-def pg_engine():
-    """Module-scoped async engine bound to the real PostgreSQL DB."""
-    eng = create_async_engine(PG_TEST_URL, future=True, pool_pre_ping=True)
-    yield eng
-    import asyncio
-
-    asyncio.get_event_loop().run_until_complete(_cleanup(eng))
-
-
-async def _cleanup(eng):
-    async with eng.begin() as conn:
-        for table in [
-            "entity_fingerprints", "relationships", "source_spans",
-            "claims", "evidence_fragments", "entities", "sources",
-            "audit_events", "jobs", "idempotency_keys",
-        ]:
-            await conn.execute(text(f"DELETE FROM {table}"))
-    await eng.dispose()
 
 
 class TestEquivalentRequestDeterminism:

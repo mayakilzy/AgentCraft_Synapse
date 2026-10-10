@@ -3,7 +3,7 @@
 **Audit Date**: 2026-10-10 (updated with JSON safety patch)
 **Auditor**: GLM (independent verification session)
 **Authoritative HEAD**: `47590e6d698c8b44a00fe134a4cff4df49d40570` (pre-patch)
-**JSON safety patch SHA**: (populated after push)
+**JSON safety patch SHA**: `8af2f2f582f6363494219c54dd38f3afd6c4bebf`
 **Audit Status**: PASS — recommendation: **CLOSE PRB-03**
 
 ---
@@ -383,7 +383,7 @@ this evidence.
 ## 10. Deliverable summary
 
 ```
-AUTHORITATIVE_HEAD = 85a96140d5ac8e5e816593d0290845fbc90846ec
+AUTHORITATIVE_HEAD = 8af2f2f582f6363494219c54dd38f3afd6c4bebf
 SHA_DISCREPANCY = RESOLVED
 MIGRATION_BACKFILL = PASS
 LEGACY_DUPLICATE_HANDLING = PASS
@@ -395,6 +395,6 @@ FULL_REGRESSION = PASS
 RUFF = PASS
 OPENAPI = PASS
 PRB_03_FINAL_RECOMMENDATION = CLOSE
-FINAL_SHA = 3815b9f6f2745613a2dc9ff854d3ba29b11a606d
-OPEN_LIMITATIONS = PRB-01..02/04..07 unchanged; advisory lock key collision (theoretical, negligible); per-domain serialization (acceptable); malformed JSON entities skipped (documented); determinism depends on advisory lock (intended design)
+FINAL_SHA = 8af2f2f582f6363494219c54dd38f3afd6c4bebf
+OPEN_LIMITATIONS = PRB-01..02/04..07 unchanged; advisory lock key collision (theoretical, negligible); per-domain serialization (acceptable); determinism depends on advisory lock (intended design)
 ```

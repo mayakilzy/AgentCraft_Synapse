@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: TEST-INFRA-01 — Eliminate Recursive Regression Test Execution
 **Starting SHA**: `9e40f01c8a7b10781fc0eeb244e5793c1755b2a7` (G05-T05 closure)
-**Final SHA**: (populated after push)
+**Final SHA**: `5d34671b0392ca2481bdacad128b38ceafb4729f`
 **Date**: 2026-10-10
 **Context**: G05-T05C validation closure
 
@@ -329,7 +329,7 @@ TEST-INFRA-01.
 ## 7. Deliverable summary
 
 ```
-FINAL_SHA = (populated after push)
+FINAL_SHA = 5d34671b0392ca2481bdacad128b38ceafb4729f
 RECURSIVE_PYTEST_CALLS_BEFORE = 18
 RECURSIVE_PYTEST_CALLS_AFTER = 0
 FUNCTIONAL_TESTS_PRESERVED = 549 (567 before − 18 redundant wrappers; 0 unique assertions lost)

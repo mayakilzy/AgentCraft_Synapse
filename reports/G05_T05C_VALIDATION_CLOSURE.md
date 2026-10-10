@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: G05-T05C — Experiment Planning Validation & Identity Closure
 **Starting SHA**: `9e40f01c8a7b10781fc0eeb244e5793c1755b2a7` (G05-T05 closure)
-**Final SHA**: (populated after push)
+**Final SHA**: `5d34671b0392ca2481bdacad128b38ceafb4729f`
 **Date**: 2026-10-10
 **Authoritative plan**: `reports/G05_INNOVATION_IMPLEMENTATION_PLAN.md` §G05-T05 + T05C mission briefing
 
@@ -338,8 +338,8 @@ marker.
 ## 8. Deliverable summary
 
 ```
-FINAL_SHA = (populated after push)
-FULL_SUITE = 580 passed, 3 deselected (live), 0 failed, 125.96s
+FINAL_SHA = 5d34671b0392ca2481bdacad128b38ceafb4729f
+FULL_SUITE = 580 passed, 3 deselected (live), 0 failed, 123.32s
 RUFF = All checks passed (src tests scripts examples)
 OPENAPI = OpenAPI 3.1.0 OK
 FINGERPRINT_CORRECTNESS = PASS

@@ -22,6 +22,8 @@ Create Date: 2026-10-10
 from __future__ import annotations
 
 import sqlalchemy as sa
+from sqlalchemy import text
+
 from alembic import op
 
 revision = "0005_entity_fingerprints"
@@ -54,14 +56,68 @@ def upgrade() -> None:
     # Backfill: scan existing EntityRow(kind='project') and
     # EntityRow(kind='experiment') for their attributes, extract the
     # concept_fingerprint / experiment_fingerprint, and insert a row.
-    # This is best-effort — if the JSON is malformed or the fingerprint
-    # field is absent, the row is skipped (no crash). Duplicates are
-    # skipped via INSERT OR IGNORE (SQLite) / ON CONFLICT DO NOTHING (PG).
-    # We detect the dialect from the bind.
+    #
+    # Per PRB-03 FINAL AUDIT: the previous version used ON CONFLICT DO
+    # NOTHING, which SILENTLY discarded duplicate fingerprints. This
+    # version is FAIL-CLOSED: it detects duplicate fingerprints in legacy
+    # data and raises a diagnostic error instead of silently skipping.
+    #
+    # It also handles malformed JSON gracefully (skip the row with a
+    # warning, don't crash the migration).
     bind = op.get_bind()
     dialect = bind.dialect.name
 
     if dialect == "postgresql":
+        # First: detect duplicate fingerprints in legacy data.
+        # Use a safe JSON extraction that returns NULL for malformed JSON
+        # (pg_typeof check + regex guard). If duplicates exist, raise.
+        duplicate_check = bind.execute(
+            text(
+                """
+                WITH extracted AS (
+                    SELECT
+                        e.id AS entity_id,
+                        e.kind,
+                        CASE
+                            WHEN e.kind = 'project'
+                                THEN CASE
+                                    WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                        THEN e.attributes::json ->> 'concept_fingerprint'
+                                END
+                            WHEN e.kind = 'experiment'
+                                THEN CASE
+                                    WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                        THEN e.attributes::json ->> 'experiment_fingerprint'
+                                END
+                        END AS fingerprint
+                    FROM entities e
+                    WHERE e.kind IN ('project', 'experiment')
+                      AND e.attributes IS NOT NULL
+                      AND e.attributes != ''
+                )
+                SELECT fingerprint, count(*) AS c, string_agg(entity_id, ', ') AS entities
+                FROM extracted
+                WHERE fingerprint IS NOT NULL
+                GROUP BY fingerprint
+                HAVING count(*) > 1
+                """
+            )
+        ).fetchall()
+
+        if duplicate_check:
+            # Fail-closed: report the duplicates explicitly
+            dup_report = "; ".join(
+                f"fingerprint={row[0][:16]}... count={row[1]} entities=[{row[2]}]"
+                for row in duplicate_check
+            )
+            raise RuntimeError(
+                f"PRB-03 migration 0005 cannot backfill: found duplicate "
+                f"fingerprints in legacy entities. Resolve manually before "
+                f"re-running. Duplicates: {dup_report}"
+            )
+
+        # No duplicates — safe to backfill with ON CONFLICT DO NOTHING
+        # (defensive, shouldn't fire after the check above)
         op.execute(
             """
             INSERT INTO entity_fingerprints (id, entity_id, kind, fingerprint, created_at)
@@ -71,28 +127,77 @@ def upgrade() -> None:
                 e.kind,
                 CASE
                     WHEN e.kind = 'project'
-                        THEN e.attributes::json ->> 'concept_fingerprint'
+                        THEN CASE
+                            WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                THEN e.attributes::json ->> 'concept_fingerprint'
+                        END
                     WHEN e.kind = 'experiment'
-                        THEN e.attributes::json ->> 'experiment_fingerprint'
+                        THEN CASE
+                            WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                THEN e.attributes::json ->> 'experiment_fingerprint'
+                        END
                 END,
                 now()
             FROM entities e
             WHERE e.kind IN ('project', 'experiment')
               AND e.attributes IS NOT NULL
               AND e.attributes != ''
-              AND (
-                  CASE
+              AND CASE
                       WHEN e.kind = 'project'
-                          THEN e.attributes::json ->> 'concept_fingerprint'
+                          THEN CASE
+                              WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                  THEN e.attributes::json ->> 'concept_fingerprint'
+                          END
                       WHEN e.kind = 'experiment'
-                          THEN e.attributes::json ->> 'experiment_fingerprint'
-                  END
-              ) IS NOT NULL
+                          THEN CASE
+                              WHEN e.attributes ~ '^\\s*\\{.*\\}\\s*$'
+                                  THEN e.attributes::json ->> 'experiment_fingerprint'
+                          END
+                  END IS NOT NULL
             ON CONFLICT (kind, fingerprint) DO NOTHING
             """
         )
     elif dialect == "sqlite":
-        # SQLite: json_extract + INSERT OR IGNORE
+        # SQLite: json_extract is safe (returns NULL for malformed JSON)
+        # First detect duplicates
+        duplicate_check = bind.execute(
+            text(
+                """
+                WITH extracted AS (
+                    SELECT
+                        e.id AS entity_id,
+                        e.kind,
+                        CASE
+                            WHEN e.kind = 'project'
+                                THEN json_extract(e.attributes, '$.concept_fingerprint')
+                            WHEN e.kind = 'experiment'
+                                THEN json_extract(e.attributes, '$.experiment_fingerprint')
+                        END AS fingerprint
+                    FROM entities e
+                    WHERE e.kind IN ('project', 'experiment')
+                      AND e.attributes IS NOT NULL
+                      AND e.attributes != ''
+                )
+                SELECT fingerprint, count(*) AS c, group_concat(entity_id, ', ') AS entities
+                FROM extracted
+                WHERE fingerprint IS NOT NULL
+                GROUP BY fingerprint
+                HAVING count(*) > 1
+                """
+            )
+        ).fetchall()
+
+        if duplicate_check:
+            dup_report = "; ".join(
+                f"fingerprint={row[0][:16]}... count={row[1]} entities=[{row[2]}]"
+                for row in duplicate_check
+            )
+            raise RuntimeError(
+                f"PRB-03 migration 0005 cannot backfill: found duplicate "
+                f"fingerprints in legacy entities. Resolve manually before "
+                f"re-running. Duplicates: {dup_report}"
+            )
+
         op.execute(
             """
             INSERT OR IGNORE INTO entity_fingerprints (id, entity_id, kind, fingerprint, created_at)

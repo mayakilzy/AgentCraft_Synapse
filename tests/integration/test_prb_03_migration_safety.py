@@ -120,12 +120,13 @@ def _seed_legacy_clean(sync_url: str):
                 "'{\"experiment_fingerprint\": \"clean-fp-E\"}', 1)"
             )
         )
-        # 1 entity with malformed JSON (should be skipped silently)
+        # 1 entity with valid JSON but NO fingerprint field (should be skipped
+        # by the IS NOT NULL check, not by malformed-JSON detection)
         conn.execute(
             text(
                 "INSERT INTO entities (id, kind, canonical_name, aliases, attributes, version) "
-                "VALUES ('ent-clean-malformed', 'project', 'Bad JSON', '[]', "
-                "'not-valid-json{', 1)"
+                "VALUES ('ent-clean-no-fp', 'project', 'No FP', '[]', "
+                "'{\"problem_domain\": \"test\"}', 1)"
             )
         )
         # Claim + relationship referencing ent-clean-A
@@ -177,6 +178,42 @@ def _seed_legacy_with_duplicates(sync_url: str):
     eng.dispose()
 
 
+def _seed_legacy_with_malformed_json(sync_url: str):
+    r"""Seed legacy data with malformed JSON that passes the old regex
+    but fails genuine JSON validation.
+
+    The old regex '^\s*\{.*\}\s*$' passes all of these, but they are
+    NOT valid JSON:
+    - '{"name": }' — missing value after colon
+    - '{not json at all}' — no quotes, no colons
+    - '{"key": "val",}' — trailing comma
+    """
+    eng = create_engine(sync_url)
+    with eng.begin() as conn:
+        # Valid entity (should backfill)
+        conn.execute(
+            text(
+                "INSERT INTO entities (id, kind, canonical_name, aliases, attributes, version) "
+                "VALUES ('ent-valid-1', 'project', 'Valid 1', '[]', "
+                "'{\"concept_fingerprint\": \"valid-fp-1\"}', 1)"
+            )
+        )
+        # Malformed JSON that passes the OLD regex but is NOT valid JSON
+        for eid, bad_attrs in [
+            ("ent-bad-regex-pass-1", '{"name": }'),              # missing value
+            ("ent-bad-regex-pass-2", '{not json at all}'),       # no quotes
+            ("ent-bad-regex-pass-3", '{"key": "val",}'),         # trailing comma
+        ]:
+            conn.execute(
+                text(
+                    "INSERT INTO entities (id, kind, canonical_name, aliases, attributes, version) "
+                    "VALUES (:id, 'project', :name, '[]', :attrs, 1)"
+                ),
+                {"id": eid, "name": f"Bad {eid}", "attrs": bad_attrs},
+            )
+    eng.dispose()
+
+
 @pytest.fixture()
 def pg_clean_legacy():
     """Fresh PG DB + migrations 0001-0004 + clean legacy data (no duplicates)."""
@@ -196,6 +233,19 @@ def pg_duplicate_legacy():
     r = _run_alembic("upgrade", "0004_relationships")
     assert r.returncode == 0, f"alembic upgrade 0004 failed: {r.stderr}"
     _seed_legacy_with_duplicates(
+        "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
+    )
+    yield "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
+
+
+@pytest.fixture()
+def pg_malformed_json_legacy():
+    """Fresh PG DB + migrations 0001-0004 + legacy data with malformed JSON
+    that passes the old regex but fails genuine JSON validation."""
+    _reset_db()
+    r = _run_alembic("upgrade", "0004_relationships")
+    assert r.returncode == 0, f"alembic upgrade 0004 failed: {r.stderr}"
+    _seed_legacy_with_malformed_json(
         "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
     )
     yield "postgresql+psycopg://synapse@127.0.0.1:5433/synapse_test"
@@ -238,14 +288,14 @@ class TestMigrationBackfill:
                 )
                 assert row[1] == expected_kind
 
-            # The malformed-JSON entity must NOT have a fingerprint row
+            # The no-fingerprint entity must NOT have a fingerprint row
             malformed = conn.execute(
                 text(
                     "SELECT count(*) FROM entity_fingerprints "
-                    "WHERE entity_id = 'ent-clean-malformed'"
+                    "WHERE entity_id = 'ent-clean-no-fp'"
                 )
             ).scalar()
-            assert malformed == 0, "malformed-JSON entity was backfilled (should be skipped)"
+            assert malformed == 0, "no-fingerprint entity was backfilled (should be skipped)"
 
         eng.dispose()
 
@@ -437,4 +487,130 @@ class TestEntityReferenceIntegrity:
             ).scalar()
             assert ent_count == 4
 
+        eng.dispose()
+
+
+class TestMalformedJSONHandling:
+    """Verify the migration GENUINELY validates JSON — not just a regex.
+
+    Per the JSON safety patch mission: the old regex
+    '^\\s*\\{.*\\}\\s*$' is NOT a JSON validator. Strings like
+    '{"name": }' pass the regex but crash the PostgreSQL ::json cast.
+
+    The corrected migration uses a PL/pgSQL DO block with exception
+    handling (PostgreSQL) or json_valid() (SQLite) to genuinely
+    validate. Malformed JSON entities are FAIL-CLOSED: the migration
+    raises a diagnostic listing the entity IDs.
+    """
+
+    def test_regex_passing_malformed_json_detected(self, pg_malformed_json_legacy):
+        """Malformed JSON that passes the OLD regex (e.g. '{"name": }')
+        MUST be detected by the GENUINE JSON validation and cause the
+        migration to fail with a diagnostic."""
+        r = _run_alembic("upgrade", "head")
+
+        # The migration MUST fail
+        assert r.returncode != 0, (
+            "Migration should FAIL when malformed JSON is detected, "
+            "but it returned 0. Output: " + r.stdout + r.stderr
+        )
+        combined = r.stdout + r.stderr
+        # The diagnostic must mention malformed JSON or the entity IDs
+        assert (
+            "malformed" in combined.lower()
+            or "MALFORMED" in combined
+            or "ent-bad-regex-pass" in combined
+        ), (
+            f"Migration failed but did not mention malformed JSON or the "
+            f"bad entity IDs. Output: {combined[:500]}"
+        )
+        # The diagnostic must mention at least one of the malformed entity IDs
+        assert any(
+            eid in combined for eid in ["ent-bad-regex-pass-1", "ent-bad-regex-pass-2", "ent-bad-regex-pass-3"]
+        ), (
+            f"Diagnostic must mention the malformed entity IDs. Output: {combined[:500]}"
+        )
+
+    def test_malformed_json_fail_closed_no_partial_backfill(self, pg_malformed_json_legacy):
+        """When the migration fails on malformed JSON, NO fingerprint rows
+        are backfilled (fail-closed, not partial). The valid entity is
+        NOT backfilled either — the operator must fix the malformed JSON
+        first."""
+        r = _run_alembic("upgrade", "head")
+        assert r.returncode != 0
+
+        eng = create_engine(pg_malformed_json_legacy)
+        with eng.begin() as conn:
+            # Alembic rolls back the entire migration (transactional DDL)
+            table_exists = conn.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = 'entity_fingerprints')"
+                )
+            ).scalar()
+            assert not table_exists, (
+                "entity_fingerprints table exists after migration failure — "
+                "Alembic should have rolled back the entire migration"
+            )
+
+            # The valid entity (ent-valid-1) is still in entities (not deleted)
+            valid_count = conn.execute(
+                text("SELECT count(*) FROM entities WHERE id = 'ent-valid-1'")
+            ).scalar()
+            assert valid_count == 1, "Valid entity was deleted by failed migration"
+
+            # All malformed entities are still present (not deleted)
+            for eid in ["ent-bad-regex-pass-1", "ent-bad-regex-pass-2", "ent-bad-regex-pass-3"]:
+                count = conn.execute(
+                    text("SELECT count(*) FROM entities WHERE id = :id"),
+                    {"id": eid},
+                ).scalar()
+                assert count == 1, f"Malformed entity {eid} was deleted by failed migration"
+
+            # Alembic version is still 0004
+            version = conn.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar()
+            assert version == "0004_relationships", (
+                f"Alembic version should be 0004_relationships after failed "
+                f"migration, got {version}"
+            )
+
+        eng.dispose()
+
+    def test_valid_json_still_backfills_after_malformed_fixed(self, pg_malformed_json_legacy):
+        """After fixing the malformed JSON (replacing with valid JSON),
+        the migration succeeds and backfills all entities."""
+        # First attempt fails (malformed JSON present)
+        r1 = _run_alembic("upgrade", "head")
+        assert r1.returncode != 0
+
+        # Fix the malformed JSON entities — replace their attributes with valid JSON
+        eng = create_engine(pg_malformed_json_legacy)
+        with eng.begin() as conn:
+            for eid in ["ent-bad-regex-pass-1", "ent-bad-regex-pass-2", "ent-bad-regex-pass-3"]:
+                conn.execute(
+                    text(
+                        "UPDATE entities SET attributes = :attrs WHERE id = :id"
+                    ),
+                    {"attrs": json.dumps({"concept_fingerprint": f"fixed-fp-{eid}"}), "id": eid},
+                )
+        eng.dispose()
+
+        # Second attempt should succeed
+        r2 = _run_alembic("upgrade", "head")
+        assert r2.returncode == 0, (
+            f"Migration should succeed after fixing malformed JSON. "
+            f"Output: {r2.stderr}"
+        )
+
+        # Verify all 4 entities are backfilled (1 originally valid + 3 fixed)
+        eng = create_engine(pg_malformed_json_legacy)
+        with eng.begin() as conn:
+            count = conn.execute(
+                text("SELECT count(*) FROM entity_fingerprints")
+            ).scalar()
+            assert count == 4, (
+                f"Expected 4 fingerprint rows after fixing malformed JSON, got {count}"
+            )
         eng.dispose()

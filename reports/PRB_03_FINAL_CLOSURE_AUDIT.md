@@ -1,8 +1,9 @@
 # PRB-03 — Final Closure Audit
 
-**Audit Date**: 2026-10-10
+**Audit Date**: 2026-10-10 (updated with JSON safety patch)
 **Auditor**: GLM (independent verification session)
-**Authoritative HEAD**: `85a96140d5ac8e5e816593d0290845fbc90846ec`
+**Authoritative HEAD**: `47590e6d698c8b44a00fe134a4cff4df49d40570` (pre-patch)
+**JSON safety patch SHA**: (populated after push)
 **Audit Status**: PASS — recommendation: **CLOSE PRB-03**
 
 ---
@@ -274,18 +275,39 @@ The TEST-INFRA-01 closure remains intact.
 
 ---
 
-## 6. Exact modified files (this audit)
+## 6. Exact modified files (this audit + JSON safety patch)
 
 | File | Change | LOC |
 |------|--------|----:|
-| `alembic/versions/0005_entity_fingerprints.py` | **Corrected**: added duplicate detection (fail-closed) + malformed-JSON regex guard. Added `from sqlalchemy import text` import. | +95 / −20 |
-| `tests/integration/test_prb_03_migration_safety.py` | NEW. 6 migration-safety tests (backfill, duplicate detection, rollback, idempotency, downgrade, reference integrity). | +380 |
+| `alembic/versions/0005_entity_fingerprints.py` | **Corrected (audit)**: added duplicate detection (fail-closed). **Corrected (JSON patch)**: replaced regex-only JSON guard with genuine PL/pgSQL DO-block validation (PostgreSQL) + `json_valid()` (SQLite). Fixed `efp-` ID collision by using full entity ID instead of `substr(1,16)`. | +120 / −35 |
+| `tests/integration/test_prb_03_migration_safety.py` | NEW. 9 migration-safety tests: backfill, duplicate detection, fail-closed rollback, idempotency, downgrade, reference integrity, + 3 malformed-JSON tests (regex-passing detection, fail-closed, fix-and-retry). | +480 |
 | `tests/integration/test_prb_03_determinism.py` | NEW. 4 determinism tests (sequential, concurrent, component-set, persistence-uniqueness). | +260 |
 
-**No other files modified.** No code changes to `innovation.py`,
-`experiment_planner.py`, `storage/fingerprint.py`, or `api/deps.py` —
-the PRB-03 implementation from `053b052` is unchanged. The only code
-change is the migration correction (fail-closed duplicate handling).
+### 6.1 JSON safety patch details (post-audit correction)
+
+The audit's initial correction used a regex (`'^\s*\{.*\}\s*$'`) as a
+JSON guard. This is NOT a JSON validator — strings like `{"name": }`
+pass the regex but crash the PostgreSQL `::json` cast.
+
+**Patch**: replaced the regex with genuine JSON validation:
+- **PostgreSQL**: PL/pgSQL `DO` block with `BEGIN/EXCEPTION` that
+  catches `invalid_text_representation` (and `others` as a safety net).
+  Malformed JSON entities are collected and the migration FAILS CLOSED
+  with a diagnostic listing the entity IDs.
+- **SQLite**: `json_valid()` function (available since SQLite 3.9).
+  Same fail-closed behavior.
+- **ID collision fix**: `'efp-' || substr(e.id, 1, 16)` → `'efp-' || e.id`
+  to prevent PK collisions when entity IDs share the first 16 chars.
+
+**Tests added**: 3 malformed-JSON tests:
+1. `test_regex_passing_malformed_json_detected` — verifies `{"name": }`,
+   `{not json at all}`, `{"key": "val",}` are detected and cause
+   migration failure.
+2. `test_malformed_json_fail_closed_no_partial_backfill` — verifies
+   no partial backfill, no table created, alembic version stays at 0004.
+3. `test_valid_json_still_backfills_after_malformed_fixed` — verifies
+   that after fixing the malformed JSON, the migration succeeds and
+   backfills all entities.
 
 ---
 

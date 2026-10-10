@@ -4,7 +4,7 @@
 **Task**: G06-T01 — Future Signal Identification
 **Starting SHA**: `9fd75c2aa5b4d2f653066c96bc2d33fe597c7006` (G06-P00C closure)
 **Final SHA (G06-T01)**: `24117e0619f88284d38757bf73849f87c4f9da91`
-**G06-T01A correction**: applied at `<populated after T01A commit>`; see section 14.
+**G06-T01A correction**: applied at `4aead87edcefc2f8ab3ad10aa4c94aa9ff3c0327`; see section 14.
 **Date**: 2026-10-11
 **Developer**: GLM
 **Reviewer**: ChatGPT

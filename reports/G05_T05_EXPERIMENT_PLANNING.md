@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: G05-T05 — Evidence-Grounded Experiment Planning
 **Starting SHA**: `be78c253578393b928d78a4ac55220700bee9019` (G05-T04 closure)
-**Final SHA**: (populated after push)
+**Final SHA**: `e85916bf00bf349a57f18a010d7ad38cad446dbf`
 **Date**: 2026-10-10
 **Authoritative plan**: `reports/G05_INNOVATION_IMPLEMENTATION_PLAN.md` §G05-T05
 
@@ -539,7 +539,7 @@ and will not begin without a separate mission briefing.
 ## 13. Deliverable summary
 
 ```
-FINAL_SHA = (populated after push)
+FINAL_SHA = e85916bf00bf349a57f18a010d7ad38cad446dbf
 G05_T05_STATUS = PASS
 TESTS = 30 new T05 tests (6 acceptance + 10 quality-gate + 14 negative), 477 confirmed passing in session (228 unit + 249 integration across 17 files); 4 unchanged slow integration files not re-run (passed at baseline)
 RUFF = All checks passed (src tests scripts examples)

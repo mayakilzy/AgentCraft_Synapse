@@ -147,9 +147,16 @@ def app(engine, monkeypatch):
     test_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def _override_get_db():
+        # Match the production get_db behavior: commit on success,
+        # rollback on error. This ensures cross-request visibility
+        # (POST then GET from separate API sessions).
         async with test_factory() as session:
             try:
                 yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
             finally:
                 await session.close()
 

@@ -1,11 +1,9 @@
 """``POST /api/v1/experiments`` + ``GET /api/v1/experiments/{experiment_id}``
--- G05-T05 Experiment Planning API.
++ ``POST /api/v1/experiments/{experiment_id}/execute``
+-- G05-T05 + G05-T06 Experiment API.
 
-Per the corrected G05 plan (`reports/G05_INNOVATION_IMPLEMENTATION_PLAN.md`
-§5.2): these endpoints activate the G04 501 placeholders for experiment
-planning. Execution (``POST /experiments/{id}/execute``) and evidence
-feedback (``GET /hypotheses/{id}/evidence-deltas``) remain 501 placeholders
--- they belong to G05-T06.
+Per the corrected G05 plan: these endpoints activate the G04 501
+placeholders for experiment planning (T05) and execution (T06).
 """
 
 from __future__ import annotations
@@ -16,6 +14,7 @@ from pydantic import BaseModel, Field
 from synapse.api.deps import DbSessionDep, PrincipalDep, RequestIDDep
 from synapse.api.errors import NotFoundError, ValidationError
 from synapse.api.responses import Envelope
+from synapse.application.execution_record import create_execution
 from synapse.application.experiment_planner import (
     MAX_BASELINE_CHARS,
     MAX_PROTOCOL_CHARS,
@@ -173,3 +172,56 @@ async def get_experiment_plan(
         data=plan,
         request_id=request_id,
     )
+
+
+# ── POST /api/v1/experiments/{experiment_id}/execute ──────────────────────
+
+
+class ExecuteRequest(BaseModel):
+    """Request body for ``POST /api/v1/experiments/{experiment_id}/execute``."""
+
+    execution_mode: str | None = Field(
+        default=None,
+        description=(
+            "Optional override for the execution mode. If omitted, the "
+            "experiment plan's execution_mode is used."
+        ),
+    )
+
+
+@router.post("/{experiment_id}/execute", status_code=status.HTTP_200_OK)
+async def execute_experiment(
+    experiment_id: str,
+    body: ExecuteRequest,
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+) -> Envelope[dict]:
+    """Create an execution record for an existing experiment plan.
+
+    The experiment must already be persisted (via G05-T05
+    ``POST /api/v1/experiments``). This endpoint creates a traceable
+    execution record with a stable ID, lifecycle status, and protocol
+    snapshot. It does NOT execute arbitrary code -- it records that an
+    execution is starting.
+
+    Quality gates:
+    - The experiment_id must resolve to a persisted experiment plan.
+    - Idempotent: equivalent requests reuse the same execution_id.
+    - No EvidenceDelta is created during execution creation.
+    - No hypothesis state mutation.
+    """
+    try:
+        result = await create_execution(
+            session,
+            experiment_id,
+            execution_mode=body.execution_mode,
+            requester=str(principal),
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    if result is None:
+        raise NotFoundError(f"experiment {experiment_id!r} not found")
+
+    return Envelope.success(data=result, request_id=request_id)

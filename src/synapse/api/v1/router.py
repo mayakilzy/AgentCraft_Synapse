@@ -7,8 +7,10 @@ from fastapi import APIRouter
 from synapse.api.v1 import (
     capabilities,
     capability_registry,
+    executions,
     experiments,
     health,
+    hypotheses,
     innovations,
     knowledge,
     providers,
@@ -38,6 +40,12 @@ router.include_router(
 router.include_router(
     experiments.router
 )  # G05-T05: POST /api/v1/experiments + GET /api/v1/experiments/{id}
+router.include_router(
+    executions.router
+)  # G05-T06: POST /executions/{id}/observations + /finalize + GET /executions/{id}
+router.include_router(
+    hypotheses.router
+)  # G05-T06: GET /hypotheses/{id}/evidence-deltas
 router.include_router(knowledge.entities_router)
 router.include_router(knowledge.relationships_router)
 router.include_router(knowledge.claims_router)
@@ -84,22 +92,10 @@ def _not_implemented(feature: str):
 
 
 # Experiments / hypotheses
-# POST /experiments and GET /experiments/{id} are implemented in G05-T05
-# (src/synapse/api/v1/experiments.py). Do not duplicate them here as
-# placeholders.
-
-_placeholder.add_api_route(
-    "/experiments/{experiment_id}/execute",
-    _not_implemented("POST /experiments/{id}/execute"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/hypotheses/{hypothesis_id}/evidence-deltas",
-    _not_implemented("GET /hypotheses/{id}/evidence-deltas"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# POST /experiments, GET /experiments/{id}, and POST /experiments/{id}/execute
+# are implemented in G05-T05 + G05-T06 (src/synapse/api/v1/experiments.py).
+# GET /hypotheses/{id}/evidence-deltas is implemented in G05-T06
+# (src/synapse/api/v1/hypotheses.py). Do not duplicate them here.
 
 # Future scenarios
 _placeholder.add_api_route(

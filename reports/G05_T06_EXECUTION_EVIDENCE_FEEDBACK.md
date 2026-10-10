@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: G05-T06 — Experiment Execution Records + Evidence Feedback
 **Starting SHA**: `a954908aaa9476c05b967fdb37805ee748bde8b5` (PRB-03 JSON safety patch)
-**Final SHA**: (populated after push)
+**Final SHA**: `386b51dcc4eed7adec3fedd23e511c19d7bd7404`
 **Date**: 2026-10-10
 
 ---
@@ -339,7 +339,7 @@ OpenAPI 3.1.0 OK
 
 ```
 G05_T06_STATUS = PASS
-AUTHORITATIVE_HEAD = (populated after push)
+AUTHORITATIVE_HEAD = 386b51dcc4eed7adec3fedd23e511c19d7bd7404
 EXECUTION_RECORDS = PASS
 OBSERVATION_CAPTURE = PASS
 EVIDENCE_ASSESSMENT = PASS
@@ -354,5 +354,5 @@ RUFF = All checks passed
 OPENAPI = OpenAPI 3.1.0 OK
 MODIFIED_FILES = execution_record.py (new, 903 LOC), executions.py (new, 170 LOC), hypotheses.py (new, 59 LOC), experiments.py (+52 LOC), router.py (+6/-16 LOC), test_g05_t06_execution_evidence.py (new, 669 LOC), conftest.py (+6/-1 LOC)
 REMAINING_LIMITATIONS = assessment requires calibrated thresholds; no independent verification; single-origin observations not independent; no arbitrary code execution; simple confidence adjustment; PRB-01..02/04..07 unchanged
-FINAL_SHA = (populated after push)
+FINAL_SHA = 386b51dcc4eed7adec3fedd23e511c19d7bd7404
 ```

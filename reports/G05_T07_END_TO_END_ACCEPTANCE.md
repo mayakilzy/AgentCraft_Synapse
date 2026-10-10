@@ -501,7 +501,7 @@ OPENAPI = PASS
 G05_CLOSURE_READY = YES
 MODIFIED_FILES = tests/integration/conftest.py (NEW), tests/integration/test_g05_t07_end_to_end_lifecycle.py (NEW), tests/integration/test_g05_t06_audit_concurrency.py, tests/integration/test_prb_03_postgresql_concurrency.py, tests/integration/test_prb_03_determinism.py, tests/integration/test_prb_03_migration_safety.py
 REMAINING_LIMITATIONS = PRB-01..02/04..07 unchanged; assessment requires calibrated thresholds; no independent verification; single-origin observations not independent; simple confidence adjustment; per-module DB isolation cost (~5-10s/module); per-fixture DB creation in migration-safety (~3 DBs/run)
-FINAL_SHA = d1dca83154d8702fae5063f084629ef7d67ff7da
+FINAL_SHA = 424a868453b5d054da7c0b0f65a356b6be1d58db
 ```
 
 ---

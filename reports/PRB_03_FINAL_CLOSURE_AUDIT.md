@@ -373,6 +373,6 @@ FULL_REGRESSION = PASS
 RUFF = PASS
 OPENAPI = PASS
 PRB_03_FINAL_RECOMMENDATION = CLOSE
-FINAL_SHA = (populated after push)
+FINAL_SHA = 3815b9f6f2745613a2dc9ff854d3ba29b11a606d
 OPEN_LIMITATIONS = PRB-01..02/04..07 unchanged; advisory lock key collision (theoretical, negligible); per-domain serialization (acceptable); malformed JSON entities skipped (documented); determinism depends on advisory lock (intended design)
 ```

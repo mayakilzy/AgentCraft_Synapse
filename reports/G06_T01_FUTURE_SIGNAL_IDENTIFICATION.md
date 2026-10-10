@@ -556,6 +556,6 @@ FOCUSED_TESTS = 29 passed
 FULL_REGRESSION = 638 passed, 34 skipped (PG), 3 deselected (live), 0 failed
 POSTGRESQL_TESTS = 34 passed (combined PG suite)
 RUFF = PASS
-FINAL_SHA = <populated after commit>
+FINAL_SHA = 4aead87edcefc2f8ab3ad10aa4c94aa9ff3c0327
 G06_T01_READY_TO_CLOSE = YES
 ```

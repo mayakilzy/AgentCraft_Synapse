@@ -108,6 +108,7 @@ from synapse.application.retrieval import (
     hybrid_retrieve,
 )
 from synapse.observability.logging import get_logger
+from synapse.storage.fingerprint import claim_fingerprint
 from synapse.storage.models import (
     ClaimRow,
     EntityRow,
@@ -2114,14 +2115,48 @@ async def _persist_concept(
         component_entity_ids=component_ids,
     )
 
-    # Check for an existing concept with the same fingerprint
-    existing = await _find_existing_concept(session, fingerprint)
-    if existing is not None:
-        # Reuse the existing concept — no duplicate creation
-        return existing[0], existing[1], True
-
-    # Create new concept with a deterministic ID derived from the fingerprint
+    # Atomically claim the fingerprint (PRB-03 fix).
+    # This eliminates the read-before-insert race: the INSERT ... ON
+    # CONFLICT DO NOTHING (PostgreSQL) or try/except IntegrityError
+    # (SQLite) is a single atomic operation. If we lose, we reuse the
+    # winner; if we win, we proceed to insert the EntityRow + ClaimRow.
     concept_id = f"innov-{fingerprint[:16]}"
+    claim_id = f"efp-{fingerprint[:16]}"
+    winning_entity_id, we_won = await claim_fingerprint(
+        session,
+        kind="project",
+        fingerprint=fingerprint,
+        entity_id=concept_id,
+        claim_id=claim_id,
+    )
+    if not we_won:
+        # We lost the claim — reuse the winner's concept + hypothesis.
+        # The winner may not have committed yet (read-committed isolation),
+        # so we retry with a bounded backoff. This is NOT an infinite loop —
+        # at most 5 retries with 50ms sleep = 250ms max wait.
+        import asyncio as _asyncio
+
+        for attempt in range(5):
+            winner_concept = await _load_persisted_concept(session, winning_entity_id)
+            if winner_concept is not None and winner_concept.get("hypothesis_id"):
+                return (
+                    winner_concept["concept_id"],
+                    winner_concept["hypothesis_id"],
+                    True,
+                )
+            # Winner not visible yet — wait briefly and retry.
+            # Expire the session cache so the next SELECT hits the DB.
+            session.expire_all()
+            await _asyncio.sleep(0.05 * (attempt + 1))
+        # After 5 retries (~250ms), the winner is still not visible.
+        # This indicates a genuine issue (winner crashed without committing,
+        # or transaction isolation is stronger than read-committed).
+        # Raise rather than silently inventing a duplicate.
+        raise RuntimeError(
+            f"Lost fingerprint claim for concept {winning_entity_id} but "
+            f"winner not visible after 5 retries — possible transaction "
+            f"isolation issue or winner crash"
+        )
 
     # Create the innovation entity
     innov_entity = EntityRow(
@@ -2307,6 +2342,32 @@ async def generate_innovations(
         requester=requester or "g05-t03-innovation",
     )
     opportunities = opportunity_result.get("opportunities", [])
+
+    # ── Step 2.5: Acquire a per-problem-domain advisory lock (PostgreSQL) ─
+    # This prevents deadlocks when concurrent generate_innovations calls
+    # for the SAME problem_domain try to acquire per-fingerprint advisory
+    # locks in different orders (different concept retrieval sequences).
+    # The lock is per problem_domain, so concurrent calls for DIFFERENT
+    # problem domains proceed in parallel.
+    #
+    # On SQLite, advisory locks are not available — but SQLite tests are
+    # single-threaded so deadlocks cannot occur.
+    dialect_name = session.bind.dialect.name if session.bind else "unknown"
+    if dialect_name == "postgresql":
+        import hashlib as _hashlib
+
+        from sqlalchemy import text as _text
+
+        domain_lock_key = int.from_bytes(
+            _hashlib.sha256(
+                f"innovation-domain:{problem_domain}".encode()
+            ).digest()[:8],
+            "little",
+            signed=True,
+        )
+        await session.execute(
+            _text("SELECT pg_advisory_xact_lock(:key)"), {"key": domain_lock_key}
+        )
 
     # ── Step 3: Apply templates to generate concepts ────────────────────
     concepts: list[InnovationConcept] = []

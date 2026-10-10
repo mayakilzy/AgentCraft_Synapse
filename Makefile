@@ -5,7 +5,7 @@ PYTHON ?= python3
 PIP ?= pip
 COVERAGE_THRESHOLD ?= 70
 
-.PHONY: help install lint format test test-fast test-deterministic test-slow \
+.PHONY: help install lint format test test-fast test-deterministic test-slow test-pg \
 	migrate-up migrate-down openapi-check smoke clean
 
 help:  ## Show this help
@@ -36,6 +36,16 @@ test-slow:  ## Run only the known-slow integration files (for diagnosis)
 	  tests/integration/test_g04_t03_reasoning.py \
 	  tests/integration/test_g04_t05_external_client.py \
 	  tests/integration/test_g05_t01_knowledge_combination.py
+
+test-pg:  ## Run PRB-03 PostgreSQL concurrency tests (requires SYNAPSE_PG_TEST_URL)
+	@if [ -z "$$SYNAPSE_PG_TEST_URL" ]; then \
+	  echo "Set SYNAPSE_PG_TEST_URL to a PostgreSQL URL, e.g.:"; \
+	  echo "  export SYNAPSE_PG_TEST_URL=postgresql+psycopg://user@host:port/dbname"; \
+	  echo "Also set SYNAPSE_ENV=development SYNAPSE_AUTH_MODE=development"; \
+	  exit 1; \
+	fi
+	$(PYTHON) -m pytest tests/integration/test_prb_03_postgresql_concurrency.py \
+	  --no-cov -q -p no:cacheprovider -v
 
 migrate-up:  ## Apply all migrations
 	$(PYTHON) -m alembic upgrade head

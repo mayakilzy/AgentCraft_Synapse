@@ -81,6 +81,7 @@ from synapse.domain.experiment import (
     ExperimentExecutionMode,
 )
 from synapse.observability.logging import get_logger
+from synapse.storage.fingerprint import claim_fingerprint
 from synapse.storage.models import ClaimRow, EntityRow
 
 _log = get_logger("synapse.application.experiment_planner")
@@ -1037,7 +1038,7 @@ async def plan_experiment(
         artifact_refs=[],
     )
 
-    # ── Compute fingerprint + check for an existing equivalent plan ────
+    # ── Compute fingerprint + atomically claim it (PRB-03 fix) ────────
     fingerprint = _compute_experiment_fingerprint(
         hypothesis_id=hypothesis_id,
         protocol=protocol_text,
@@ -1048,27 +1049,61 @@ async def plan_experiment(
         cost_limits=cost_limits or {},
     )
 
-    existing_entity = await _find_existing_experiment(session, fingerprint)
-    if existing_entity is not None:
-        reused_plan = _attributes_to_plan(existing_entity)
-        reused_plan["was_reused"] = True
+    experiment_id = f"exp-{fingerprint[:16]}"
+    claim_id = f"efp-{fingerprint[:16]}"
+
+    # Atomic claim: INSERT into entity_fingerprints with ON CONFLICT
+    # DO NOTHING (PostgreSQL) or try/except IntegrityError (SQLite).
+    # This eliminates the read-before-insert race.
+    winning_entity_id, we_won = await claim_fingerprint(
+        session,
+        kind="experiment",
+        fingerprint=fingerprint,
+        entity_id=experiment_id,
+        claim_id=claim_id,
+    )
+
+    if not we_won:
+        # We lost the claim — another request already owns this fingerprint.
+        # Reuse the winning entity. The winner may not have committed yet
+        # (read-committed isolation), so we retry with a bounded backoff.
+        import asyncio as _asyncio
+
         _log.info(
-            "plan_experiment reused experiment_id=%s fingerprint=%s "
-            "hypothesis_id=%s",
-            existing_entity.id,
+            "plan_experiment lost claim, reusing experiment_id=%s "
+            "fingerprint=%s hypothesis_id=%s",
+            winning_entity_id,
             fingerprint[:16],
             hypothesis_id,
         )
-        return ExperimentPlanResult(
-            experiment=reused_plan,
-            unknowns=unknowns,
-            executability=executability,
-            request_id=request_id,
-            planned_at=_utcnow_iso(),
+        for attempt in range(5):
+            winning_entity = (
+                await session.execute(
+                    select(EntityRow).where(
+                        EntityRow.id == winning_entity_id,
+                        EntityRow.kind == "experiment",
+                    )
+                )
+            ).scalar_one_or_none()
+            if winning_entity is not None:
+                reused_plan = _attributes_to_plan(winning_entity)
+                reused_plan["was_reused"] = True
+                return ExperimentPlanResult(
+                    experiment=reused_plan,
+                    unknowns=unknowns,
+                    executability=executability,
+                    request_id=request_id,
+                    planned_at=_utcnow_iso(),
+                )
+            session.expire_all()
+            await _asyncio.sleep(0.05 * (attempt + 1))
+        raise RuntimeError(
+            f"Lost fingerprint claim for experiment {winning_entity_id} but "
+            f"winner not visible after 5 retries — possible transaction "
+            f"isolation issue or winner crash"
         )
 
     # ── Persist the new experiment ─────────────────────────────────────
-    experiment_id = f"exp-{fingerprint[:16]}"
     canonical_name = (
         f"Experiment for hypothesis {hypothesis_id[:24]} "
         f"({mode_value})"

@@ -307,3 +307,32 @@ class RelationshipRow(Base):
         Index("ix_relationships_origin_verification", "origin", "verification_state"),
         Index("ix_relationships_from_to", "from_entity_id", "to_entity_id"),
     )
+
+
+class EntityFingerprintRow(Base):
+    """DB-enforced idempotent identity for innovation concepts + experiments.
+
+    Per PRB-03 permanent closure: the (kind, fingerprint) pair has a
+    UNIQUE constraint. The application layer atomically claims a
+    fingerprint via INSERT ... ON CONFLICT DO NOTHING (PostgreSQL) or
+    try/except IntegrityError (SQLite). On conflict, the winning
+    entity is reused.
+
+    This eliminates the read-before-insert race that previously allowed
+    two concurrent requests with the same fingerprint to both INSERT.
+    """
+
+    __tablename__ = "entity_fingerprints"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("kind", "fingerprint", name="uq_entity_fingerprints_kind_fp"),
+        Index("ix_entity_fingerprints_entity", "entity_id"),
+    )

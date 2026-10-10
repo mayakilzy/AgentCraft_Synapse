@@ -98,11 +98,24 @@ def get_engine():
 
 
 async def get_db() -> AsyncSession:
-    """Yield a session for the request lifecycle."""
+    """Yield a session for the request lifecycle.
+
+    Per PRB-03 permanent closure: the session is the single transaction
+    owner. Successful requests commit before the session closes; failed
+    requests roll back. This guarantees:
+    - Write requests are persisted before the 200 response is sent.
+    - Partial writes from failed requests are rolled back.
+    - Cross-session visibility (GET after POST from a separate request)
+      works because the POST committed.
+    """
     _, factory = get_engine()
     async with factory() as session:
         try:
             yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
         finally:
             await session.close()
 

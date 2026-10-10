@@ -750,3 +750,248 @@ async def test_limitations_documented(app, db_session):
     limitations_text = " ".join(result["limitations"])
     assert "Layer 2" in limitations_text or "historical change" in limitations_text
     assert "independent_origin_count" in limitations_text or "PRB-04" in limitations_text
+
+
+# =========================================================================
+# G06-T01A Focused Acceptance Corrections — additional negative tests
+# =========================================================================
+
+
+# == Correction A: combination failure handling ===========================
+
+
+@pytest.mark.asyncio
+async def test_corr_a_combination_failure_not_silent_zero(app, db_session, monkeypatch):
+    """When combine_knowledge() raises an exception, the service must NOT
+    silently report combination_count=0. It must report status='unavailable'
+    and combination_count=None, plus an explicit limitation."""
+    await _seed_supported_capability(db_session)
+    await db_session.commit()
+
+    # Monkey-patch combine_knowledge to raise
+    from synapse.application import future_signal as fs_mod
+
+    async def _failing_combine(*args, **kwargs):
+        raise RuntimeError("simulated combine_knowledge failure")
+
+    monkeypatch.setattr(fs_mod, "combine_knowledge", _failing_combine)
+
+    result = await identify_future_signals(db_session)
+    assert result["snapshot_only"] is True
+
+    # All combination_density_snapshot signals must carry status=unavailable
+    # and combination_count=None (NOT 0).
+    density_signals = [s for s in result["signals"] if s["kind"] == "combination_density_snapshot"]
+    assert len(density_signals) >= 1
+    for s in density_signals:
+        assert s["combination_density_status"] == "unavailable"
+        assert s["combination_count"] is None
+
+    # An explicit limitation must document the failure
+    limitations_text = " ".join(result["limitations"])
+    assert "failed" in limitations_text.lower() or "unavailable" in limitations_text.lower()
+    assert "null" in limitations_text or "none" in limitations_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_corr_a_combination_success_zero_is_factual(app, db_session):
+    """When combine_knowledge() succeeds and returns 0 combinations, the
+    service must report status='computed' and combination_count=0 (factual
+    zero, not a failure)."""
+    await _seed_supported_capability(db_session)
+    await db_session.commit()
+
+    result = await identify_future_signals(db_session)
+    density_signals = [s for s in result["signals"] if s["kind"] == "combination_density_snapshot"]
+    assert len(density_signals) >= 1
+    for s in density_signals:
+        assert s["combination_density_status"] == "computed"
+        assert s["combination_count"] is not None
+        assert isinstance(s["combination_count"], int)
+
+
+# == Correction B: zero-evidence source counts ===========================
+
+
+@pytest.mark.asyncio
+async def test_corr_b_zero_evidence_zero_independent_origins(app, db_session):
+    """A capability with ZERO evidence fragments must have
+    independent_origin_count=0, NOT 1. Zero sources must not imply one
+    independently established origin."""
+    fixture = await _seed_not_evidenced_capability(db_session)
+    await db_session.commit()
+
+    result = await identify_future_signals(
+        db_session, focus_capability_id=fixture["capability_id"]
+    )
+    footprint_signals = [
+        s for s in result["signals"] if s["kind"] == "evidence_footprint_snapshot"
+    ]
+    assert len(footprint_signals) == 1
+    fp = footprint_signals[0]
+    assert fp["distinct_source_uri_count"] == 0
+    assert fp["independent_origin_count"] == 0, (
+        f"Zero evidence must yield independent_origin_count=0, got {fp['independent_origin_count']}"
+    )
+    assert fp["evidence_refs"] == []
+
+
+@pytest.mark.asyncio
+async def test_corr_b_one_source_one_conservative_origin(app, db_session):
+    """A capability with 1 evidence fragment from 1 source must have
+    independent_origin_count=1 (conservative PRB-04 default — provenance
+    independence unverified, but there IS evidence)."""
+    fixture = await _seed_supported_capability(db_session)
+    await db_session.commit()
+
+    result = await identify_future_signals(
+        db_session, focus_capability_id=fixture["capability_id"]
+    )
+    footprint_signals = [
+        s for s in result["signals"] if s["kind"] == "evidence_footprint_snapshot"
+    ]
+    assert len(footprint_signals) == 1
+    fp = footprint_signals[0]
+    assert fp["distinct_source_uri_count"] == 1
+    assert fp["independent_origin_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_corr_b_multiple_urls_still_one_conservative_origin(app, db_session):
+    """Multiple distinct source URLs (without verified origin independence)
+    must NOT inflate independent_origin_count beyond 1. The conservative
+    PRB-04 policy is preserved; no new inference algorithm is introduced."""
+    # Two distinct source URLs, no provenance metadata
+    src_a = await _make_source(db_session, "src-corr-b-a", "https://example.com/corr-b-a")
+    src_b = await _make_source(db_session, "src-corr-b-b", "https://example.com/corr-b-b")
+    await _make_fragment(db_session, "frag-corr-b-a", src_a, "tool provides cap (source A).")
+    await _make_fragment(db_session, "frag-corr-b-b", src_b, "tool provides cap (source B).")
+    await _make_entity(db_session, "ent-corr-b", "technology", "corr-b-tool")
+    cap = await _make_entity(db_session, "cap-corr-b", "capability", "corr-b-cap")
+    await _make_claim(
+        db_session, "claim-corr-b",
+        "corr-b-tool provides corr-b-cap.",
+        subject_ref="ent-corr-b", object_ref="cap-corr-b",
+        evidence_refs=["frag-corr-b-a", "frag-corr-b-b"],
+    )
+    await create_relationship(
+        db_session, from_entity_id="ent-corr-b", to_entity_id="cap-corr-b",
+        predicate="PROVIDES", evidence_refs=["frag-corr-b-a"], origin="explicit",
+    )
+    await db_session.commit()
+    await assess_claim(db_session, "claim-corr-b", requester="corr-b")
+    await db_session.commit()
+
+    result = await identify_future_signals(
+        db_session, focus_capability_id=cap.id
+    )
+    footprint_signals = [
+        s for s in result["signals"] if s["kind"] == "evidence_footprint_snapshot"
+    ]
+    assert len(footprint_signals) == 1
+    fp = footprint_signals[0]
+    assert fp["distinct_source_uri_count"] == 2
+    assert fp["independent_origin_count"] == 1, (
+        f"Multiple URLs without verified independence must stay at 1, "
+        f"got {fp['independent_origin_count']}"
+    )
+
+
+# == Correction C: signal_id subject identity + content_version ==========
+
+
+@pytest.mark.asyncio
+async def test_corr_c_signal_id_is_subject_identity(app, db_session, engine):
+    """signal_id must be a SUBJECT identity: stable across content changes.
+    The same (kind, capability) pair produces the same signal_id even when
+    evidence_refs or other content fields change."""
+    fixture = await _seed_supported_capability(db_session)
+    await db_session.commit()
+
+    # First scan
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s1:
+        r1 = await identify_future_signals(s1, focus_capability_id=fixture["capability_id"])
+        fp1 = next(s for s in r1["signals"] if s["kind"] == "evidence_footprint_snapshot")
+        sig_id_1 = fp1["signal_id"]
+        cv_1 = fp1["content_version"]
+
+    # Add a NEW evidence fragment (changes the content but not the subject)
+    async with factory() as s2:
+        from synapse.storage.models import EvidenceFragmentRow, SourceRow
+        new_src = SourceRow(
+            id="src-corr-c-new", canonical_uri="https://example.com/corr-c-new",
+            source_type="paper", status="extracted",
+        )
+        s2.add(new_src)
+        new_frag = EvidenceFragmentRow(
+            id="frag-corr-c-new", acquisition_id="acq-corr-c-new",
+            source_id="src-corr-c-new", source_uri="https://example.com/corr-c-new",
+            exact_excerpt="additional evidence for source discovery.",
+            excerpt_hash="hash-corr-c-new", retrieved_at=RECENT_ISO,
+            extraction_method="test-fixture", content_fingerprint="fp-corr-c-new",
+            toolkit_commit_sha="fixture",
+        )
+        s2.add(new_frag)
+        # Update the claim to reference the new fragment too
+        import json as _json
+
+        from sqlalchemy import select as sel
+
+        from synapse.storage.models import ClaimRow
+        claim = (await s2.execute(
+            sel(ClaimRow).where(ClaimRow.id == "claim-t01-sd")
+        )).scalar_one()
+        refs = _json.loads(claim.evidence_refs or "[]")
+        refs.append("frag-corr-c-new")
+        claim.evidence_refs = _json.dumps(refs)
+        await s2.commit()
+        await assess_claim(s2, "claim-t01-sd", requester="corr-c")
+        await s2.commit()
+
+    # Second scan (content has changed)
+    async with factory() as s3:
+        r2 = await identify_future_signals(s3, focus_capability_id=fixture["capability_id"])
+        fp2 = next(s for s in r2["signals"] if s["kind"] == "evidence_footprint_snapshot")
+        sig_id_2 = fp2["signal_id"]
+        cv_2 = fp2["content_version"]
+
+    # signal_id MUST be stable (subject identity)
+    assert sig_id_1 == sig_id_2, (
+        f"signal_id changed from {sig_id_1} to {sig_id_2} — subject identity violated"
+    )
+    # content_version MUST differ (content changed)
+    assert cv_1 != cv_2, (
+        f"content_version did not change ({cv_1} == {cv_2}) — content identity broken"
+    )
+
+
+@pytest.mark.asyncio
+async def test_corr_c_signal_id_stable_across_repeated_scans(app, db_session, engine):
+    """Repeated scans with identical KB state produce identical signal_id
+    AND identical content_version."""
+    await _seed_supported_capability(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s1:
+        r1 = await identify_future_signals(s1)
+    async with factory() as s2:
+        r2 = await identify_future_signals(s2)
+
+    for s1_sig, s2_sig in zip(r1["signals"], r2["signals"], strict=False):
+        assert s1_sig["signal_id"] == s2_sig["signal_id"]
+        assert s1_sig["content_version"] == s2_sig["content_version"]
+
+
+@pytest.mark.asyncio
+async def test_corr_c_content_version_includes_material_fields(app, db_session):
+    """content_version must be present on every signal and must be a
+    deterministic hash of materially relevant content fields."""
+    await _seed_supported_capability(db_session)
+    await db_session.commit()
+    result = await identify_future_signals(db_session)
+    for s in result["signals"]:
+        assert "content_version" in s
+        assert s["content_version"].startswith("cv-")
+        assert len(s["content_version"]) == 19  # "cv-" + 16 hex chars

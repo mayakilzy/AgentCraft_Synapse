@@ -3,7 +3,8 @@
 **Status**: PASS
 **Task**: G06-T01 — Future Signal Identification
 **Starting SHA**: `9fd75c2aa5b4d2f653066c96bc2d33fe597c7006` (G06-P00C closure)
-**Final SHA**: `<populated after commit>`
+**Final SHA (G06-T01)**: `24117e0619f88284d38757bf73849f87c4f9da91`
+**G06-T01A correction**: applied at `<populated after T01A commit>`; see section 14.
 **Date**: 2026-10-11
 **Developer**: GLM
 **Reviewer**: ChatGPT
@@ -408,14 +409,14 @@ EVIDENCE_PROVENANCE = PASS
 SOURCE_INDEPENDENCE = PASS
 DETERMINISTIC_IDENTITY = PASS
 NO_FABRICATED_TRENDS = PASS
-FOCUSED_TESTS = 21 passed
+FOCUSED_TESTS = 21 passed (G06-T01) + 8 passed (G06-T01A corrections) = 29 passed
 FULL_REGRESSION = 630 passed, 34 skipped (PG), 3 deselected (live), 0 failed
 POSTGRESQL_TESTS = 34 passed (combined PG suite; G06-T01 has no PG-specific behavior)
 RUFF = PASS
 PRODUCTION_SCOPE_RESPECTED = YES
 MODIFIED_FILES = src/synapse/application/future_signal.py (NEW), tests/integration/test_g06_t01_future_signals.py (NEW)
-FINAL_SHA = 7438ed62d0bcc1b5c856c4bc97a8611dcaa36a84
-READY_FOR_G06_T02_REVIEW = YES
+FINAL_SHA = 24117e0619f88284d38757bf73849f87c4f9da91
+G06_T01_READY_TO_CLOSE = YES (after G06-T01A corrections, see section 14)
 ```
 
 ---
@@ -427,3 +428,134 @@ implemented, tested, and verified. No production code outside the new
 service file was modified. All gates pass.
 
 **Do not begin G06-T02 without explicit reviewer authorization.**
+
+---
+
+## 14. G06-T01A — Focused Acceptance Corrections
+
+G06-T01 was functionally accepted subject to four focused corrections
+(G06-T01A). All four are applied and verified below.
+
+### 14.1 Correction A — Combination failure handling
+
+**Problem**: The broad `except Exception: pass` around
+`combine_knowledge()` silently converted any service failure into a
+factual combination count of zero. A computation failure was
+indistinguishable from a successful computation returning zero
+combinations.
+
+**Fix**: Replaced the silent swallow with explicit status tracking:
+- `combination_density_status` field: `"computed"` (success, count is
+  factual, possibly 0) or `"unavailable"` (failure, count is null).
+- On failure: `combination_count = None` (not 0), an explicit
+  limitation string is added to the response, and every
+  `combination_density_snapshot` signal carries
+  `combination_density_status="unavailable"`.
+- On success: `combination_count` is the real count (0 is factual);
+  `combination_density_status="computed"`.
+
+**Tests added**:
+- `test_corr_a_combination_failure_not_silent_zero`: monkey-patches
+  `combine_knowledge` to raise; verifies status=unavailable,
+  count=None, and an explicit limitation.
+- `test_corr_a_combination_success_zero_is_factual`: verifies that a
+  successful 0-count scan reports status=computed and count=0 (int).
+
+### 14.2 Correction B — Zero-evidence source counts
+
+**Problem**: When a capability had zero evidence fragments,
+`independent_origin_count` was set to 1 (the conservative PRB-04
+default). This was wrong: zero actual sources must not imply one
+independently established origin.
+
+**Fix**: The conservative PRB-04 default of 1 applies only when there
+IS evidence but its independence is unverified. When there are zero
+fragments, `independent_origin_count = 0`. The semantics are now:
+- 0 fragments → `independent_origin_count = 0`, `distinct_source_uri_count = 0`
+- ≥1 fragment → `independent_origin_count = 1` (conservative; never
+  inflated by URL count), `distinct_source_uri_count` = factual URL count
+
+No new provenance inference algorithm is introduced (per mission §4).
+Multiple URLs without verified origin independence never inflate
+`independent_origin_count` beyond 1.
+
+**Tests added**:
+- `test_corr_b_zero_evidence_zero_independent_origins`: zero fragments
+  → independent_origin_count=0.
+- `test_corr_b_one_source_one_conservative_origin`: 1 fragment →
+  independent_origin_count=1.
+- `test_corr_b_multiple_urls_still_one_conservative_origin`: 2 URLs
+  without verified independence → independent_origin_count=1 (not 2).
+
+### 14.3 Correction C — Signal identity semantics
+
+**Problem**: `signal_id` was a hybrid — it included `evidence_refs`
+(content) but not all materially relevant content fields. It was
+neither a stable subject identity nor a complete content identity.
+
+**Fix**: Adopted **subject identity** for `signal_id` and added a
+separate `content_version` for content identity:
+- `signal_id = "sig-" + SHA-256(kind + capability_id)[:16]` — stable
+  subject identity. The same (kind, capability) pair always produces
+  the same signal_id, even when evidence_refs or other content fields
+  change between scans. Consumers can track "the evidence-footprint
+  signal for capability X" over time.
+- `content_version = "cv-" + SHA-256(all materially relevant content
+  fields)[:16]` — content identity. It changes when any content field
+  changes (evidence_refs, gap_classification, combination_count,
+  distinct_source_uri_count, independent_origin_count, timestamps,
+  extra fields). Consumers detect content changes by comparing
+  content_version values.
+
+Both are computed deterministically; neither is persisted. No new
+infrastructure is introduced.
+
+**Tests added**:
+- `test_corr_c_signal_id_is_subject_identity`: adds new evidence
+  between scans; verifies signal_id is stable but content_version
+  changes.
+- `test_corr_c_signal_id_stable_across_repeated_scans`: identical KB
+  state → identical signal_id AND content_version.
+- `test_corr_c_content_version_includes_material_fields`: every signal
+  has a content_version field starting with "cv-" (19 chars).
+
+### 14.4 Correction D — Report and SHA reconciliation
+
+**Problem**: The G06-T01 report had two SHA contradictions:
+1. The header `**Final SHA**` field still said `<populated after
+   commit>` (stale placeholder, never populated).
+2. The deliverable summary `FINAL_SHA` field said `7438ed6` (the main
+   G06-T01 commit), but the actual final HEAD after the SHA-population
+   follow-up commit was `24117e0`.
+
+**Fix**: Corrected both fields to reflect the actual final HEAD
+`24117e0619f88284d38757bf73849f87c4f9da91`. The G06-T01A authoritative
+start SHA is `24117e0` (the G06-T01 final HEAD).
+
+### 14.5 G06-T01A validation results
+
+- **Focused tests**: 29 passed (21 original G06-T01 + 8 G06-T01A
+  correction tests) in 5.34s.
+- **Full deterministic regression**: 638 passed, 34 skipped (PG),
+  3 deselected (live), 0 failed in 145.46s.
+- **Ruff**: clean.
+- **PostgreSQL**: combined PG suite — 34 passed in 51.34s (G06-T01A
+  has no PG-specific behavior; confirms no regression).
+- **OpenAPI**: OK (no endpoints added).
+
+### 14.6 G06-T01A deliverable summary
+
+```
+G06_T01A_STATUS = PASS
+AUTHORITATIVE_START_SHA = 24117e0619f88284d38757bf73849f87c4f9da91
+COMBINATION_FAILURE_HANDLING = PASS
+ZERO_EVIDENCE_SOURCE_COUNT = PASS
+SIGNAL_IDENTITY_SEMANTICS = PASS
+SHA_RECONCILIATION = PASS
+FOCUSED_TESTS = 29 passed
+FULL_REGRESSION = 638 passed, 34 skipped (PG), 3 deselected (live), 0 failed
+POSTGRESQL_TESTS = 34 passed (combined PG suite)
+RUFF = PASS
+FINAL_SHA = <populated after commit>
+G06_T01_READY_TO_CLOSE = YES
+```

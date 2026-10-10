@@ -146,9 +146,7 @@ async def identify_future_signals(
     )
 
     # ── Resolve the capability set to scan ─────────────────────────────
-    capabilities = await _resolve_capabilities(
-        session, focus_capability_id, focus_entity_id, limit
-    )
+    capabilities = await _resolve_capabilities(session, focus_capability_id, focus_entity_id, limit)
 
     if not capabilities:
         return _empty_result(request_id)
@@ -174,7 +172,12 @@ async def identify_future_signals(
                 gap_by_cap_id[cap_id] = req
 
     # ── Compute combination density once (if a problem domain is given) ──
+    # Distinguish success-with-zero from failure (Correction A):
+    # - On success: combination_count = the real count (0 is factual).
+    # - On failure: combination_count = None + an explicit limitation.
     combination_counts: dict[str, int] = {}
+    combination_density_status = "computed"  # default: succeeded with 0
+    combination_density_error: str | None = None
     if combination_problem_domain or capabilities:
         domain = combination_problem_domain or "technology landscape"
         try:
@@ -189,10 +192,12 @@ async def identify_future_signals(
                     comp_id = comp.get("entity_id") if isinstance(comp, dict) else comp
                     if comp_id:
                         combination_counts[comp_id] = combination_counts.get(comp_id, 0) + 1
-        except Exception:
-            # combine_knowledge may return 0 combinations on small KBs;
-            # that is a legitimate empty result, not an error.
-            pass
+        except Exception as exc:
+            # combine_knowledge failed — do NOT pretend count is 0.
+            # Mark as unavailable so consumers know the density is unknown.
+            combination_density_status = "unavailable"
+            combination_density_error = f"{type(exc).__name__}: {exc}"
+            combination_counts = {}  # no reliable counts
 
     # ── Build signals for each capability ──────────────────────────────
     signals: list[dict[str, Any]] = []
@@ -209,13 +214,21 @@ async def identify_future_signals(
         # Gather dependency-graph edges
         dep_edges = await _gather_dependency_graph_edges(session, cap_id)
 
+        # Combination count: None when density computation failed
+        # (Correction A); the real count (possibly 0) when it succeeded.
+        if combination_density_status == "unavailable":
+            cap_combination_count: int | None = None
+        else:
+            cap_combination_count = combination_counts.get(cap_id, 0)
+
         cap_signals = _build_signals_for_capability(
             cap_id=cap_id,
             cap_name=cap_name,
             gap_assessment=gap_assessment,
             evidence_info=evidence_info,
             dep_edges=dep_edges,
-            combination_count=combination_counts.get(cap_id, 0),
+            combination_count=cap_combination_count,
+            combination_density_status=combination_density_status,
         )
         signals.extend(cap_signals)
 
@@ -223,11 +236,19 @@ async def identify_future_signals(
     signals.sort(key=lambda s: (s["kind"], s["capability_id"] or ""))
 
     # Document limitations
-    if not combination_counts:
+    if combination_density_status == "unavailable":
+        limitations.append(
+            "combination_density_snapshot: combine_knowledge() failed "
+            f"({combination_density_error}); combination_count is null "
+            "(unavailable) for all capabilities. This is a computation "
+            "failure, not a factual zero."
+        )
+    elif not combination_counts:
         limitations.append(
             "combination_density_snapshot: combine_knowledge() returned 0 "
             "combinations for the given domain; combination_count is 0 for "
-            "all capabilities. This is a factual empty result, not an error."
+            "all capabilities. This is a factual empty result (status="
+            "'computed'), not an error."
         )
     limitations.append(
         "Layer 2 (verified historical change) is not available: Synapse does "
@@ -236,10 +257,12 @@ async def identify_future_signals(
         "signal kinds are not supported."
     )
     limitations.append(
-        "independent_origin_count is conservative (1, per PRB-04) unless "
-        "explicit provenance metadata (distinct SourceRow.publisher or "
-        "SourceRow.author) is available and differs. Differing unverified "
-        "publisher strings do not establish independent origins."
+        "independent_origin_count is 0 when there are no evidence fragments; "
+        "1 (conservative, per PRB-04) when there is >=1 fragment and "
+        "provenance independence is unverified. G06-T01 does not introduce a "
+        "new provenance inference algorithm; distinct source URLs are "
+        "reported as distinct_source_uri_count but do not inflate "
+        "independent_origin_count."
     )
 
     return {
@@ -262,12 +285,17 @@ def _build_signals_for_capability(
     gap_assessment: dict[str, Any] | None,
     evidence_info: dict[str, Any],
     dep_edges: list[dict[str, Any]],
-    combination_count: int,
+    combination_count: int | None,
+    combination_density_status: str,
 ) -> list[dict[str, Any]]:
     """Build all applicable signals for a single capability.
 
     Returns up to 5 signals (one per kind). Each signal is only emitted
     if it has grounded content.
+
+    ``combination_count`` is ``None`` when ``combine_knowledge()`` failed
+    (status="unavailable"); it is the real count (possibly 0) when
+    status="computed" (Correction A).
     """
     signals: list[dict[str, Any]] = []
 
@@ -292,6 +320,7 @@ def _build_signals_for_capability(
                 evidence_refs=evidence_refs,
                 gap_classification=classification,
                 combination_count=combination_count,
+                combination_density_status=combination_density_status,
                 distinct_source_uri_count=distinct_source_uri_count,
                 independent_origin_count=independent_origin_count,
                 first_seen_at=first_seen_at,
@@ -319,6 +348,7 @@ def _build_signals_for_capability(
             evidence_refs=evidence_refs,
             gap_classification=classification,
             combination_count=combination_count,
+            combination_density_status=combination_density_status,
             distinct_source_uri_count=distinct_source_uri_count,
             independent_origin_count=independent_origin_count,
             first_seen_at=first_seen_at,
@@ -336,7 +366,22 @@ def _build_signals_for_capability(
         )
     )
 
-    # 3. combination_density_snapshot — always emit (0 is a valid density)
+    # 3. combination_density_snapshot — always emit. When status="computed",
+    #    combination_count is the real count (0 is factual). When
+    #    status="unavailable", combination_count is None (Correction A).
+    if combination_count is None:
+        density_notes = (
+            f"Capability '{cap_name}' combination density is UNAVAILABLE: "
+            f"combine_knowledge() failed. combination_count is null. This "
+            f"is a computation failure, not a factual zero."
+        )
+    else:
+        density_notes = (
+            f"Capability '{cap_name}' appears in {combination_count} "
+            f"combine_knowledge() candidate(s) for the given domain "
+            f"(status={combination_density_status}). This is a structural "
+            f"snapshot of graph centrality, not a trend."
+        )
     signals.append(
         _make_signal(
             kind="combination_density_snapshot",
@@ -345,16 +390,12 @@ def _build_signals_for_capability(
             evidence_refs=evidence_refs,
             gap_classification=classification,
             combination_count=combination_count,
+            combination_density_status=combination_density_status,
             distinct_source_uri_count=distinct_source_uri_count,
             independent_origin_count=independent_origin_count,
             first_seen_at=first_seen_at,
             last_seen_at=last_seen_at,
-            notes=(
-                f"Capability '{cap_name}' appears in {combination_count} "
-                f"combine_knowledge() candidate(s) for the given domain. "
-                f"This is a structural snapshot of graph centrality, not a "
-                f"trend."
-            ),
+            notes=density_notes,
         )
     )
 
@@ -371,6 +412,7 @@ def _build_signals_for_capability(
                 evidence_refs=evidence_refs,
                 gap_classification=classification,
                 combination_count=combination_count,
+                combination_density_status=combination_density_status,
                 distinct_source_uri_count=distinct_source_uri_count,
                 independent_origin_count=independent_origin_count,
                 first_seen_at=first_seen_at,
@@ -398,6 +440,7 @@ def _build_signals_for_capability(
             evidence_refs=evidence_refs,
             gap_classification=classification,
             combination_count=combination_count,
+            combination_density_status=combination_density_status,
             distinct_source_uri_count=distinct_source_uri_count,
             independent_origin_count=independent_origin_count,
             first_seen_at=first_seen_at,
@@ -424,7 +467,8 @@ def _make_signal(
     capability_name: str,
     evidence_refs: list[str],
     gap_classification: str | None,
-    combination_count: int,
+    combination_count: int | None,
+    combination_density_status: str,
     distinct_source_uri_count: int,
     independent_origin_count: int,
     first_seen_at: str | None,
@@ -432,11 +476,29 @@ def _make_signal(
     notes: str,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Construct a single signal dict with a deterministic signal_id."""
+    """Construct a single signal dict with a deterministic signal_id.
+
+    Identity semantics (Correction C):
+
+    - ``signal_id`` is a **subject identity**: ``sig-`` + SHA-256(kind +
+      capability_id)[:16]. It is stable across content changes — the
+      same (kind, capability) pair always produces the same signal_id,
+      even when evidence_refs, gap_classification, or other content
+      fields change between scans. This lets consumers track "the
+      evidence-footprint signal for capability X" over time.
+
+    - ``content_version`` is a **content identity**: ``cv-`` +
+      SHA-256(all materially relevant content fields)[:16]. It changes
+      when any content field changes, so consumers can detect that a
+      signal's snapshot content has changed between scans by comparing
+      content_version values.
+
+    Both are computed deterministically; neither is persisted. No new
+    infrastructure is introduced.
+    """
     signal_id = _deterministic_signal_id(
         kind=kind,
         capability_id=capability_id,
-        evidence_refs=evidence_refs,
     )
     signal: dict[str, Any] = {
         "signal_id": signal_id,
@@ -449,6 +511,7 @@ def _make_signal(
         "evidence_refs": list(evidence_refs),
         "gap_classification": gap_classification,
         "combination_count": combination_count,
+        "combination_density_status": combination_density_status,
         "distinct_source_uri_count": distinct_source_uri_count,
         "independent_origin_count": independent_origin_count,
         "first_seen_at": first_seen_at,
@@ -459,6 +522,9 @@ def _make_signal(
         for k, v in extra.items():
             if k not in signal:
                 signal[k] = v
+    # Compute content_version AFTER extra fields are merged, so all
+    # materially relevant content fields are included in the fingerprint.
+    signal["content_version"] = _deterministic_content_version(signal)
     return signal
 
 
@@ -469,21 +535,58 @@ def _deterministic_signal_id(
     *,
     kind: str,
     capability_id: str,
-    evidence_refs: list[str],
 ) -> str:
-    """Compute a deterministic signal ID.
+    """Compute a deterministic **subject identity** signal ID.
 
     The ID is ``sig-`` + the first 16 hex chars of SHA-256 over
-    (kind, capability_id, sorted(evidence_refs)). For identical KB
-    state and identical inputs, the ID is stable across calls.
+    (kind, capability_id). It identifies the signal's SUBJECT (which
+    capability + which signal kind), NOT the signal's content. It is
+    stable across content changes — the same (kind, capability) pair
+    always produces the same signal_id, even when evidence_refs or
+    other content fields change between scans (Correction C).
     """
-    payload = "\n".join([
-        kind,
-        capability_id,
-        "\n".join(sorted(evidence_refs)),
-    ])
+    payload = "\n".join([kind, capability_id])
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"sig-{digest}"
+
+
+def _deterministic_content_version(signal: dict[str, Any]) -> str:
+    """Compute a deterministic **content version** fingerprint.
+
+    The fingerprint is ``cv-`` + the first 16 hex chars of SHA-256 over
+    all materially relevant content fields of the signal. It changes
+    when any content field changes, so consumers can detect that a
+    signal's snapshot content has changed between scans by comparing
+    content_version values (Correction C).
+
+    Materially relevant fields (excluded from the fingerprint:
+    signal_id, content_version, notes, temporal_type, snapshot_only —
+    these are either the identity itself, derived, or non-material
+    metadata):
+    - kind, capability_id, capability_name, entity_id
+    - evidence_refs (sorted)
+    - gap_classification
+    - combination_count, combination_density_status
+    - distinct_source_uri_count, independent_origin_count
+    - first_seen_at, last_seen_at
+    - all extra fields (e.g., fragment_count, dependency_edges,
+      match_quality, reason, contradicting_evidence_refs)
+    """
+    # Fields that are identity/metadata, not content.
+    _EXCLUDED = {"signal_id", "content_version", "notes", "temporal_type", "snapshot_only"}
+    material_fields = []
+    for k in sorted(signal.keys()):
+        if k in _EXCLUDED:
+            continue
+        v = signal[k]
+        # Normalize lists/dicts to stable JSON for hashing
+        if isinstance(v, (list, dict)):
+            material_fields.append(f"{k}={json.dumps(v, sort_keys=True, default=str)}")
+        else:
+            material_fields.append(f"{k}={v}")
+    payload = "\n".join(material_fields)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"cv-{digest}"
 
 
 def _deterministic_request_id(
@@ -499,14 +602,16 @@ def _deterministic_request_id(
     for the response so callers can correlate. It does not depend on
     wall-clock time.
     """
-    payload = "\n".join([
-        "g06-t01-future-signal",
-        focus_capability_id or "",
-        focus_entity_id or "",
-        combination_problem_domain or "",
-        combination_context or "",
-        str(limit),
-    ])
+    payload = "\n".join(
+        [
+            "g06-t01-future-signal",
+            focus_capability_id or "",
+            focus_entity_id or "",
+            combination_problem_domain or "",
+            combination_context or "",
+            str(limit),
+        ]
+    )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     return f"req-{digest}"
 
@@ -578,8 +683,7 @@ async def _gather_evidence_footprint(
     """
     # Find claims whose subject_ref or object_ref is this capability
     claim_stmt = select(ClaimRow).where(
-        (ClaimRow.subject_ref == capability_id)
-        | (ClaimRow.object_ref == capability_id)
+        (ClaimRow.subject_ref == capability_id) | (ClaimRow.object_ref == capability_id)
     )
     claims = list((await session.execute(claim_stmt)).scalars().all())
 
@@ -602,18 +706,21 @@ async def _gather_evidence_footprint(
             fragment_ids.add(ref)
 
     if not fragment_ids:
+        # Correction B: zero evidence fragments => zero independent origins.
+        # The conservative PRB-04 default of 1 applies only when there IS
+        # evidence but its independence is unverified — not when there is
+        # no evidence at all. Zero sources must not imply one independently
+        # established origin.
         return {
             "fragment_ids": [],
             "distinct_source_uri_count": 0,
-            "independent_origin_count": _CONSERVATIVE_INDEPENDENT_ORIGIN_COUNT,
+            "independent_origin_count": 0,
             "first_seen_at": None,
             "last_seen_at": None,
         }
 
     # Load the actual fragment rows
-    frag_stmt = select(EvidenceFragmentRow).where(
-        EvidenceFragmentRow.id.in_(fragment_ids)
-    )
+    frag_stmt = select(EvidenceFragmentRow).where(EvidenceFragmentRow.id.in_(fragment_ids))
     fragments = list((await session.execute(frag_stmt)).scalars().all())
 
     # Distinct source URLs (factual count — NOT independence)
@@ -626,14 +733,20 @@ async def _gather_evidence_footprint(
         src_stmt = select(SourceRow).where(SourceRow.id.in_(source_ids))
         source_rows = list((await session.execute(src_stmt)).scalars().all())
 
-    # ── Conservative independent-origin count (per PRB-04) ─────────────
-    # Default: 1 (conservative). Only increase if explicit provenance
-    # metadata is available AND differs. Differing unverified publisher
-    # strings are NOT sufficient — but we follow the existing
-    # verification.py policy: conservative = 1 unless proven otherwise.
-    # Per the G06-P00C correction D and the reviewer's mandatory
-    # correction in the G06-T01 mission §4: "Do not introduce a new
-    # independence inference algorithm in G06-T01."
+    # ── Conservative independent-origin count (per PRB-04, Correction B) ─
+    # When there IS >=1 evidence fragment, the conservative default is 1
+    # (per PRB-04: provenance independence is unverified). This applies
+    # REGARDLESS of how many distinct source URLs exist — multiple URLs
+    # without verified origin independence do not inflate the count.
+    # Differing unverified publisher/author strings are NOT sufficient
+    # to establish independent primary origins.
+    #
+    # G06-T01 does NOT introduce a new provenance inference algorithm
+    # (per mission section 4). The count is never > 1 in G06-T01.
+    #
+    # When there are ZERO fragments, independent_origin_count = 0 (handled
+    # in the early return above) — zero sources must not imply one
+    # independently established origin.
     independent_origin_count = _CONSERVATIVE_INDEPENDENT_ORIGIN_COUNT
 
     # Timestamps (factual observation of retrieved_at range)
@@ -713,8 +826,7 @@ def _empty_result(request_id: str) -> dict[str, Any]:
         "snapshot_only": True,
         "generated_at": datetime.now(UTC).isoformat(),
         "limitations": [
-            "No capabilities found in the knowledge base. "
-            "Empty result — no fabricated signals.",
+            "No capabilities found in the knowledge base. Empty result — no fabricated signals.",
             "Layer 2 (verified historical change) is not available.",
         ],
         "request_id": request_id,

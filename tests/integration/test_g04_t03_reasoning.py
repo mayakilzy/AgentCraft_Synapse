@@ -25,11 +25,7 @@ Plus a realistic multi-source synthesis demonstration (mission §6).
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -864,43 +860,6 @@ def test_api_openapi_includes_reasoning_routes(app):
     paths = schema["paths"]
     assert "/api/v1/reasoning/queries" in paths
     assert "/api/v1/reasoning/intents" in paths
-
-
-# ── Test 16: G01-G04-T02C regression ────────────────────────────────────────
-
-
-def test_g01_g04_t02c_regression():
-    """All existing G01-G04-T02C tests still pass."""
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/integration/test_g04_t01_retrieval.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g04_t02_capability_registry.py::test_g01_g04_t01_regression",
-            "tests/integration/test_g04_t02_capability_registry.py::test_g01_g04_t02_regression_after_attribution_fix",
-            "tests/integration/test_g04_t02_capability_registry.py::test_provider_attribution_isolation",
-            "tests/integration/test_g04_t02_capability_registry.py::test_multiple_providers_each_supported",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout
-
-
-# ── Realistic multi-source synthesis demonstration (mission §6) ─────────────
-
-
-@pytest.mark.asyncio
 async def test_realistic_demonstration_ai_research_assistant(app, db_session):
     """Multi-source synthesis: 'What documented components and techniques
     could support an AI research assistant, and what limitations must be
@@ -1412,30 +1371,3 @@ async def test_evidence_references_provenance_intact(app, db_session):
         assert "reason" in ooc, f"reason missing in ooc entry: {ooc}"
 
 
-def test_g01_g04_t03_regression_after_contradiction_closure():
-    """All existing G01-G04-T03 tests still pass after the G04-T03C fix.
-
-    Per G04-T03C mandatory test 7.
-    """
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/integration/test_g04_t03_reasoning.py",
-            "--no-cov",
-            "-q",
-            "-k",
-            "not test_g01_g04_t03_regression_after_contradiction_closure",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

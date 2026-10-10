@@ -627,31 +627,3 @@ def test_audit_scripts_preserve_evidence_provenance():
         # Scripts that don't produce evidence records are exempt
         if script.name == "validate_toolkit_index.py":
             continue
-
-
-# ── G01 regression: must still pass ──────────────────────────────────────────
-
-
-def test_g01_tests_still_pass():
-    """Run a subset of G01 tests to confirm we haven't broken anything."""
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_claim.py",
-            "tests/unit/security/test_ssrf.py",
-            "tests/unit/api/test_capabilities.py",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

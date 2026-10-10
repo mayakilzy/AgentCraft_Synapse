@@ -383,36 +383,3 @@ async def test_job_queue_decoupled_from_acquisition(app, db_session):
     results = await process_pending_extraction_jobs(db_session, max_jobs=5)
     await db_session.commit()
     assert any(r.get("ok") for r in results)
-
-
-# ── Acceptance Test 8: G01/G02/G03-T01 regression ──────────────────────────
-
-
-def test_g01_g02_g03_t01_regression():
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_claim.py",
-            "tests/unit/security/test_ssrf.py",
-            "tests/unit/application/test_extraction.py",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

@@ -546,37 +546,3 @@ async def test_context_specific_contradictions_not_falsely_merged(app, db_sessio
 
     assert r_a["assessment"]["outcome"] == VerificationOutcome.SOURCE_SUPPORTED
     assert r_b["assessment"]["outcome"] == VerificationOutcome.SOURCE_SUPPORTED
-
-
-# ── G01/G02/G03 regression ─────────────────────────────────────────────────
-
-
-def test_g01_g02_g03_regression():
-    """All existing tests still pass — no regression from policy correction."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_claim.py",
-            "tests/unit/application/test_extraction.py",
-            "tests/integration/test_g03_t03_relationship_service.py::test_g01_g02_g03_regression",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

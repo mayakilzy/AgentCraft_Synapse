@@ -494,48 +494,6 @@ async def test_05_deterministic(app, db_session):
     types1 = [o["gap_type"] for o in result1["opportunities"]]
     types2 = [o["gap_type"] for o in result2["opportunities"]]
     assert types1 == types2, f"non-deterministic gap types: {types1} vs {types2}"
-
-
-# ── Acceptance Test 6: G01-G04-T01 regression ─────────────────────────────
-
-
-def test_06_g01_g05_t01_regression():
-    """Run a focused subset of the existing regression suite to confirm
-    G05-T02 introduces no regression in G01-G04-T01 behavior."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/integration/test_g04_t01_retrieval.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g05_t01_knowledge_combination.py::test_05_bounded_deterministic_output",
-            "tests/integration/test_g05_t01_knowledge_combination.py::test_06_epistemic_isolation_hypothesized_excluded",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout
-
-
-# ── Negative Test: Empty knowledge graph ───────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_negative_empty_knowledge_graph(app, db_session):
     """An empty knowledge graph returns no opportunities with truthful unknowns."""
     # No fixture seeded — empty DB

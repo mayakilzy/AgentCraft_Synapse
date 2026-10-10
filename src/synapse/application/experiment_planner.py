@@ -127,12 +127,44 @@ def _normalize_protocol(protocol: str) -> str:
     return " ".join(protocol.lower().split())
 
 
+def _normalize_text(text: str) -> str:
+    """Normalize an arbitrary text field for fingerprinting.
+
+    Same rules as ``_normalize_protocol``: collapse whitespace, lowercase.
+    Used for ``baseline`` and any other free-text input that materially
+    changes the resulting plan.
+    """
+    return " ".join(text.lower().split())
+
+
+def _normalize_dict(d: dict[str, Any] | None) -> str:
+    """Normalize a dict for fingerprinting.
+
+    Sorts by key, stringifies values, drops empty/None values. This makes
+    ``{"b": 2, "a": 1}`` and ``{"a": 1, "b": 2}`` produce the same
+    fingerprint, while ``{"a": 1}`` and ``{"a": 2}`` produce different
+    fingerprints.
+    """
+    if not d:
+        return ""
+    items = []
+    for k in sorted(d.keys()):
+        v = d[k]
+        if v is None:
+            continue
+        items.append(f"{k}={v!r}")
+    return ";".join(items)
+
+
 def _compute_experiment_fingerprint(
     *,
     hypothesis_id: str,
     protocol: str,
-    metric_keys: list[str],
+    baseline: str,
+    metrics: dict[str, Any],
     execution_mode: str,
+    safety_limits: dict[str, Any],
+    cost_limits: dict[str, Any],
 ) -> str:
     """SHA-256 fingerprint of the planning request.
 
@@ -140,13 +172,32 @@ def _compute_experiment_fingerprint(
     hypothesis. Two different plans for the same hypothesis produce two
     different fingerprints -- this is what enables multiple experiments per
     hypothesis.
+
+    Every input that materially changes the resulting plan participates in
+    the fingerprint (per G05-T05C task 3):
+    - ``hypothesis_id`` — the target of the experiment
+    - ``protocol`` (normalized) — what the experiment does
+    - ``baseline`` (normalized) — what the experiment is compared against
+    - ``metrics`` (sorted by key, with values) — how success is measured
+    - ``execution_mode`` — dry_run/sandbox/local/networked/production
+    - ``safety_limits`` (sorted by key, with values) — operational guardrails
+    - ``cost_limits`` (sorted by key, with values) — resource guardrails
+
+    Normalization ensures equivalent inputs produce the same fingerprint:
+    - Text fields are whitespace-collapsed and lowercased.
+    - Dicts are key-sorted with stringified values.
+    - Metric keys are sorted; values are included (not just keys).
     """
+    metrics_items = ";".join(f"{k}={metrics[k]!r}" for k in sorted(metrics.keys()))
     payload = "\n".join(
         [
             hypothesis_id,
             _normalize_protocol(protocol),
-            "\n".join(sorted(metric_keys)),
+            _normalize_text(baseline),
+            metrics_items,
             execution_mode,
+            _normalize_dict(safety_limits),
+            _normalize_dict(cost_limits),
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -316,11 +367,22 @@ def _synthesize_success_criteria(
 ) -> list[dict[str, Any]]:
     """Produce ≥1 explicit success criterion.
 
-    If metrics are available, each metric becomes a success criterion with
-    a placeholder threshold (the threshold is the experimenter's to fill in
-    before execution -- we record the structure, not the value). If no
-    metrics are available, we synthesize one qualitative criterion tied to
-    the primary objective.
+    Each criterion carries a ``calibration_status`` field (per G05-T05C
+    task 4) so the experimenter can distinguish:
+
+    - ``"operational"`` — the threshold is set (non-null); the rule is a
+      fully operational pass/fail test.
+    - ``"requires_calibration"`` — the threshold is null; the
+      experimenter must set a value before execution. The criterion
+      structure is valid, but it is NOT a pass/fail rule until
+      calibrated.
+    - ``"untestable"`` — no metric could be inferred; the experimenter
+      must redefine the criterion before execution. This is never
+      presented as an operational rule.
+
+    A null threshold is therefore NEVER presented as a fully operational
+    pass/fail rule -- it is explicitly labeled ``"requires_calibration"``
+    or ``"untestable"``.
     """
     criteria: list[dict[str, Any]] = []
     if metrics:
@@ -333,10 +395,12 @@ def _synthesize_success_criteria(
                     "dtype": dtype if isinstance(dtype, str) else str(dtype),
                     "comparator": ">=",
                     "threshold": None,  # to be set by the experimenter
+                    "calibration_status": "requires_calibration",
                     "rationale": (
                         f"Metric '{name}' is declared in the experiment's "
                         f"metric schema; threshold value must be set before "
-                        f"execution."
+                        f"execution. Until calibrated, this criterion is "
+                        f"structural only -- NOT an operational pass/fail rule."
                     ),
                 }
             )
@@ -347,11 +411,12 @@ def _synthesize_success_criteria(
                 "dtype": "boolean",
                 "comparator": "==",
                 "threshold": True,
+                "calibration_status": "operational",
                 "rationale": (
                     "No quantitative metric was inferable from the concept's "
                     "evidence; the experiment is judged by whether the "
                     "primary objective is met (qualitative assessment by "
-                    "the experimenter)."
+                    "the experimenter). The boolean threshold is operational."
                 ),
             }
         )
@@ -365,10 +430,12 @@ def _synthesize_success_criteria(
                 "dtype": "unspecified",
                 "comparator": "unspecified",
                 "threshold": None,
+                "calibration_status": "untestable",
                 "rationale": (
                     "No metric could be inferred from the available "
                     "evidence; the experimenter must define a measurable "
-                    "success criterion before execution."
+                    "success criterion before execution. This criterion is "
+                    "NOT operational."
                 ),
             }
         )
@@ -382,10 +449,10 @@ def _synthesize_failure_criteria(
 ) -> list[dict[str, Any]]:
     """Produce ≥1 explicit failure criterion.
 
-    Failure criteria are the *opposite* boundary -- the conditions under
-    which the experiment would *weaken* the hypothesis, not just fail to
-    support it. We tie them to either a metric threshold or an evidenced
-    failure mode.
+    Each criterion carries a ``calibration_status`` field (per G05-T05C
+    task 4): ``"operational"``, ``"requires_calibration"``, or
+    ``"untestable"``. A null threshold is never presented as an
+    operational rule.
     """
     criteria: list[dict[str, Any]] = []
     if metrics:
@@ -398,10 +465,12 @@ def _synthesize_failure_criteria(
                     "dtype": dtype if isinstance(dtype, str) else str(dtype),
                     "comparator": "<",
                     "threshold": None,
+                    "calibration_status": "requires_calibration",
                     "rationale": (
                         f"If '{name}' falls below the experimenter-set "
                         f"threshold, the experiment is recorded as "
-                        f"contradicting the hypothesis."
+                        f"contradicting the hypothesis. Until calibrated, "
+                        f"this criterion is structural only."
                     ),
                 }
             )
@@ -418,6 +487,7 @@ def _synthesize_failure_criteria(
                 "dtype": "boolean",
                 "comparator": "==",
                 "threshold": True,
+                "calibration_status": "operational",
                 "rationale": (
                     f"Observation of failure mode '{mode or 'unknown'}' "
                     f"({desc[:160]}) is recorded as contradicting evidence."
@@ -431,6 +501,7 @@ def _synthesize_failure_criteria(
                 "dtype": "boolean",
                 "comparator": "==",
                 "threshold": True,
+                "calibration_status": "operational",
                 "rationale": (
                     "If the experiment collects no usable evidence, the "
                     "result is recorded as inconclusive -- never as "
@@ -970,8 +1041,11 @@ async def plan_experiment(
     fingerprint = _compute_experiment_fingerprint(
         hypothesis_id=hypothesis_id,
         protocol=protocol_text,
-        metric_keys=list(metrics_dict.keys()),
+        baseline=baseline_text,
+        metrics=metrics_dict,
         execution_mode=mode_value,
+        safety_limits=safety_limits or {},
+        cost_limits=cost_limits or {},
     )
 
     existing_entity = await _find_existing_experiment(session, fingerprint)

@@ -36,11 +36,7 @@ Plus a realistic demonstration (mission briefing §6):
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -867,44 +863,6 @@ async def test_repeated_analyses_deterministic(app, db_session):
     chain_lens_1 = [len(a["evidence_chain"]) for a in r1["requirements"]]
     chain_lens_2 = [len(a["evidence_chain"]) for a in r2["requirements"]]
     assert chain_lens_1 == chain_lens_2
-
-
-# ── Test 16: G01-G04-T01 regression ─────────────────────────────────────────
-
-
-def test_g01_g04_t01_regression():
-    """All existing G01/G02/G03/G04-T01 tests still pass."""
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_relationship.py",
-            "tests/integration/test_g03_t03_relationship_service.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g03_t04_verification.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g03_t05_final_integration.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g04_t01_retrieval.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g04_t01_retrieval.py::test_realistic_demonstration_query",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout
-
-
-# ── Realistic demonstration (mission briefing §6) ──────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_realistic_demonstration_ai_research_assistant(app, db_session):
     """Evaluate: "Build an AI research assistant that retrieves technical
     sources, extracts useful knowledge, verifies evidence, and identifies
@@ -1578,35 +1536,3 @@ async def test_attribution_no_candidates_keeps_capability_level(app, db_session)
     )
 
 
-def test_g01_g04_t02_regression_after_attribution_fix():
-    """All existing G01-G04-T02 tests still pass after the G04-T02C fix.
-
-    Per G04-T02C mandatory regression scenario 8.
-    """
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/integration/test_g04_t02_capability_registry.py",
-            "--no-cov",
-            "-q",
-            "-k",
-            "not test_g01_g04_t02_regression_after_attribution_fix",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

@@ -377,38 +377,3 @@ async def test_08_concurrent_requests(app, db_session):
     innov_stmt = select(EntityRow).where(EntityRow.kind == "project")
     innovs = list((await db_session.execute(innov_stmt)).scalars().all())
     assert len(innovs) == len({e.id for e in innovs}), "duplicate entities despite idempotency"
-
-
-# ── Test 9: Regression — G01-G05-T03 ─────────────────────────────────────
-
-
-def test_09_regression():
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/integration/test_g05_t01_knowledge_combination.py::test_05_bounded_deterministic_output",
-            "tests/integration/test_g05_t03_innovation_generation.py::test_01_generates_valid_concepts",
-            "tests/integration/test_g05_t03_innovation_generation.py::test_02_every_concept_has_uncertainty",
-            "tests/integration/test_g05_t03_innovation_generation.py::test_03_hypothesis_id_points_to_hypothesized",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout

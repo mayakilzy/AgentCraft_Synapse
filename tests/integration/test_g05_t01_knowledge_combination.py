@@ -505,49 +505,6 @@ async def test_06_epistemic_isolation_hypothesized_excluded(app, db_session):
                     f"hypothesized relationship contaminated combination: "
                     f"{comb['combination_basis']}"
                 )
-
-
-# ── Acceptance Test 7: G01-G04 regression ──────────────────────────────────
-
-
-def test_07_g01_g04_regression():
-    """Run a focused subset of the existing regression suite to confirm
-    G05-T01 introduces no regression in G01-G04 behavior."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/unit/api/test_health.py",
-            "tests/integration/test_g04_t01_retrieval.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g04_t02_capability_registry.py::test_g01_g04_t02_regression_after_attribution_fix",
-            "tests/integration/test_g04_t03_reasoning.py::test_g01_g04_t02c_regression",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout
-
-
-# ── Negative Test: Unsupported combinations (no capabilities) ─────────────
-
-
-@pytest.mark.asyncio
 async def test_negative_no_capabilities(app, db_session):
     """When the knowledge graph has no capabilities, combine_knowledge
     returns an empty combinations list with truthful unknowns."""

@@ -37,9 +37,6 @@ Plus the G04 plan §9-T05 acceptance criteria (5 items):
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -748,9 +745,22 @@ async def test_11_predictable_error_responses(app, client, db_session, auth_head
     # 501 not implemented (placeholder route).
     # Note: /innovations/generate was activated in G05-T03;
     # /innovations/{id}/critique was activated in G05-T04.
-    # The remaining placeholder routes (/experiments, etc.) still return 501.
+    # POST /api/v1/experiments was activated in G05-T05 -- it now returns
+    # 422 (validation error) on an empty body, NOT 501. The remaining
+    # placeholder routes (/experiments/{id}/execute,
+    # /hypotheses/{id}/evidence-deltas, /future/scenarios*) still return 501.
     r = client.post(
         "/api/v1/experiments",
+        headers=auth_headers_reader,
+        json={},
+    )
+    assert r.status_code == 422
+    body = r.json()
+    assert body["error"]["code"] == "validation_error"
+
+    # A genuinely unimplemented route still returns 501.
+    r = client.post(
+        "/api/v1/future/scenarios",
         headers=auth_headers_reader,
         json={},
     )
@@ -911,49 +921,6 @@ async def test_14_backward_compatibility_g04_endpoints(
     assert r.status_code == 200
     body = r.json()
     assert body["data"]["count"] >= 6
-
-
-# ── Acceptance Test 15: Full G01-G04-T04C regression ──────────────────────
-
-
-def test_15_full_regression_g01_through_t04c():
-    """Run a focused subset of the existing regression suite to confirm
-    G04-T05 introduces no regression in G01-G04-T04C behavior.
-
-    The subprocess timeout is generous (600s) because the spawned pytest
-    loads the full Synapse package and runs integration tests that build
-    a fresh DB per test. Under CI load this can take 3-5 minutes.
-    """
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/unit/api/test_health.py",
-            "tests/integration/test_app_boot.py",
-            "tests/integration/test_g04_t01_retrieval.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g04_t02_capability_registry.py::test_g01_g04_t02_regression_after_attribution_fix",
-            "tests/integration/test_g04_t03_reasoning.py::test_g01_g04_t02c_regression",
-            "tests/integration/test_g04_t03_reasoning.py::test_g01_g04_t03_regression_after_contradiction_closure",
-            "tests/integration/test_g04_t04_evaluation.py::test_18_g01_g04_t03c_regression",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout
-
-
-# ── CORS preflight tests (G04 plan T05 acceptance criteria #4) ───────────
 
 
 def test_cors_allowed_origin_preflight(app):

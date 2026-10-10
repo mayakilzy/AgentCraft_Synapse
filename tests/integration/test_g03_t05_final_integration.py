@@ -456,38 +456,3 @@ def test_api_remaining_501_placeholders(app):
     assert "/api/v1/innovations/generate" in paths
     assert "/api/v1/experiments" in paths
     assert "/api/v1/future/scenarios" in paths
-
-
-# ── G01/G02/G03 regression ────────────────────────────────────────────────
-
-
-def test_g01_g02_g03_regression():
-    """All existing tests still pass — no regression from G03-T05."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_relationship.py",
-            "tests/unit/application/test_extraction.py",
-            "tests/integration/test_g03_t04_verification.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g03_t03_relationship_service.py::test_g01_g02_g03_regression",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=90,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout

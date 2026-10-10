@@ -801,48 +801,6 @@ def test_constants_are_sane():
         VERIFICATION_SCORE[VerificationOutcome.SOURCE_SUPPORTED]
         > VERIFICATION_SCORE[VerificationOutcome.CONTESTED]
     )
-
-
-# ── Test 11: G01-G03 regression ──────────────────────────────────────────────
-
-
-def test_g01_g02_g03_regression():
-    """All existing G01/G02/G03 tests still pass -- no regression from G04-T01."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/domain/test_relationship.py",
-            "tests/unit/application/test_extraction.py",
-            "tests/integration/test_g03_t03_relationship_service.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g03_t04_verification.py::test_g01_g02_g03_regression",
-            "tests/integration/test_g03_t05_final_integration.py::test_g01_g02_g03_regression",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout
-
-
-# ── Realistic demonstration query (mission briefing §8) ─────────────────────
-
-
-@pytest.mark.asyncio
 async def test_realistic_demonstration_query(app, db_session):
     """Demonstration query:
 

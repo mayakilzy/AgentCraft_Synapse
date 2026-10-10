@@ -348,45 +348,6 @@ def test_06_openapi_includes_innovations(app):
         paths = schema["paths"]
         assert "/api/v1/innovations/generate" in paths
         assert "post" in paths["/api/v1/innovations/generate"]
-
-
-# ── Acceptance Test 7: Regression intact ──────────────────────────────────
-
-
-def test_07_regression():
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/integration/test_g05_t01_knowledge_combination.py::test_05_bounded_deterministic_output",
-            "tests/integration/test_g05_t02_opportunity_discovery.py::test_05_deterministic",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout
-
-
-# ── Negative Test: Sparse evidence ────────────────────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_negative_sparse_evidence(app, db_session):
     """Concepts with sparse evidence are preserved with labeled uncertainty."""
     # Seed only one capability with minimal evidence

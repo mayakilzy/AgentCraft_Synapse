@@ -373,45 +373,6 @@ async def test_07_integration_and_benefit(app, db_session):
     assert result is not None
     arch = result.get("architecture", {})
     assert arch.get("components")  # non-empty
-
-
-# ── Acceptance Test 8: Regression ──────────────────────────────────────────
-
-
-def test_08_regression():
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    REPO_ROOT = Path(__file__).resolve().parents[2]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/api/test_openapi.py",
-            "tests/integration/test_g05_t03_innovation_generation.py::test_01_generates_valid_concepts",
-            "tests/integration/test_g05_t03c_idempotency.py::test_01_same_request_repeated_sequentially",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr[:600]}\nstdout={r.stdout[:600]}"
-    assert "passed" in r.stdout
-
-
-# ── Negative Test: Missing/invalid innovation ID ───────────────────────────
-
-
-@pytest.mark.asyncio
 async def test_negative_missing_innovation_id(app, db_session):
     result = await critique_innovation(db_session, "innov-does-not-exist")
     assert result is None

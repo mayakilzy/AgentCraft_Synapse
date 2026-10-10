@@ -11,7 +11,6 @@ Network-dependent tests are marked @live and skipped by default.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -324,42 +323,7 @@ def test_openapi_still_lists_remaining_501_placeholders(app):
     assert "/api/v1/future/scenarios" in paths
 
 
-# ── Required Test #8 (part 2): G01 regression — all tests still pass ─────────
-
-
-def test_g01_security_tests_still_pass():
-    """Run a subset of G01 security tests to confirm no regression."""
-    import subprocess
-    import sys
-
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    r = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/unit/security/test_ssrf.py",
-            "tests/unit/domain/test_claim.py",
-            "tests/unit/api/test_capabilities.py",
-            "--no-cov",
-            "-q",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
-    assert r.returncode == 0, f"stderr={r.stderr}\nstdout={r.stdout}"
-    assert "passed" in r.stdout
-
-
-# ── Live integration tests (skipped by default) ─────────────────────────────
-
-
 @pytest.mark.live
-@pytest.mark.asyncio
 async def test_live_arxiv_discovery_and_ingest(app, db_session):
     """REAL end-to-end: discover on arXiv, ingest the first result,
     extract via trafilatura, fingerprint, persist.

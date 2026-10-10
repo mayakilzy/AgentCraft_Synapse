@@ -5,8 +5,8 @@ PYTHON ?= python3
 PIP ?= pip
 COVERAGE_THRESHOLD ?= 70
 
-.PHONY: help install lint format test test-fast migrate-up migrate-down \
-	openapi-check smoke clean
+.PHONY: help install lint format test test-fast test-deterministic test-slow \
+	migrate-up migrate-down openapi-check smoke clean
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -24,8 +24,18 @@ format:  ## Ruff format (in place)
 test:  ## Full pytest with coverage
 	$(PYTHON) -m pytest
 
-test-fast:  ## Pytest without coverage
-	$(PYTHON) -m pytest --no-cov -q
+test-fast:  ## Pytest without coverage (skips live tests)
+	$(PYTHON) -m pytest --no-cov -q -m "not live"
+
+test-deterministic:  ## Complete deterministic suite — no coverage, no live tests, single invocation
+	$(PYTHON) -m pytest --no-cov -q -p no:cacheprovider -m "not live"
+
+test-slow:  ## Run only the known-slow integration files (for diagnosis)
+	$(PYTHON) -m pytest --no-cov -q -p no:cacheprovider \
+	  tests/integration/test_g04_t02_capability_registry.py \
+	  tests/integration/test_g04_t03_reasoning.py \
+	  tests/integration/test_g04_t05_external_client.py \
+	  tests/integration/test_g05_t01_knowledge_combination.py
 
 migrate-up:  ## Apply all migrations
 	$(PYTHON) -m alembic upgrade head

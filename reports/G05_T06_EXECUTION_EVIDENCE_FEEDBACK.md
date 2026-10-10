@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: G05-T06 — Experiment Execution Records + Evidence Feedback
 **Starting SHA**: `a954908aaa9476c05b967fdb37805ee748bde8b5` (PRB-03 JSON safety patch)
-**Final SHA**: (populated after push — focused acceptance audit)
+**Final SHA**: `655a960564b56ebe48cd9d5f07a4d9d153283e88`
 **Date**: 2026-10-10 (updated with focused acceptance audit)
 
 ---
@@ -390,7 +390,7 @@ OpenAPI 3.1.0 OK
 
 ```
 G05_T06_STATUS = PASS
-AUTHORITATIVE_HEAD = (populated after push)
+AUTHORITATIVE_HEAD = 655a960564b56ebe48cd9d5f07a4d9d153283e88
 EXECUTION_RECORDS = PASS
 OBSERVATION_CAPTURE = PASS
 EVIDENCE_ASSESSMENT = PASS
@@ -411,6 +411,6 @@ EVIDENCE_PROVENANCE = PASS (observations append-only, source_ref preserved, conf
 CONFIDENCE_UPDATE_IDEMPOTENCY = PASS (re-finalization raises, confidence unchanged)
 MODIFIED_FILES = execution_record.py (+run_id in fingerprint, +with_for_update on record_observation + finalize_execution), experiments.py (+run_id field in ExecuteRequest), test_g05_t06_execution_evidence.py (updated test_09/10 + added test_10b), test_g05_t06_audit_concurrency.py (new, 9 PG tests)
 REMAINING_LIMITATIONS = assessment requires calibrated thresholds; no independent verification; single-origin observations not independent; no arbitrary code execution; simple confidence adjustment; PG test suites share DB (test-ordering issue when run together, each suite passes independently); PRB-01..02/04..07 unchanged
-FINAL_SHA = (populated after push)
+FINAL_SHA = 655a960564b56ebe48cd9d5f07a4d9d153283e88
 G05_T06_READY_TO_CLOSE = YES
 ```

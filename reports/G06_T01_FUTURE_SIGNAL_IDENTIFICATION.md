@@ -414,7 +414,7 @@ POSTGRESQL_TESTS = 34 passed (combined PG suite; G06-T01 has no PG-specific beha
 RUFF = PASS
 PRODUCTION_SCOPE_RESPECTED = YES
 MODIFIED_FILES = src/synapse/application/future_signal.py (NEW), tests/integration/test_g06_t01_future_signals.py (NEW)
-FINAL_SHA = <populated after commit>
+FINAL_SHA = 7438ed62d0bcc1b5c856c4bc97a8611dcaa36a84
 READY_FOR_G06_T02_REVIEW = YES
 ```
 

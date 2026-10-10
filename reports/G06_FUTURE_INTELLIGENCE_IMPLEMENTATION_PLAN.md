@@ -189,40 +189,130 @@ And in `src/synapse/domain/scenario.py:1-7`:
 
 ### 3.1 Horizon semantics (binding interpretation for G06)
 
-| Horizon | Meaning | Evidence requirement | Assumption load | Typical use |
-|---------|---------|---------------------|-----------------|-------------|
-| **F0** | **Existing** — the capability/configuration exists today in the knowledge base. | Supported by ≥1 verified claim. | None required. | "Today's state of the art." A scenario at F0 is really a structured snapshot, not a future. |
-| **F1** | **Possible but uncommon** — the components exist and are documented, but the combination is not evidenced in the KB. | Each component must have ≥1 supporting claim. The *combination* has no evidence. | ≥1 assumption explaining why the combination is plausible. | "We could do this today, but nobody in our KB has." |
-| **F2** | **Near-term engineering** — the components exist; the missing piece is engineering effort (no new research required). | Components supported. Missing dependencies must be **engineering** items (tooling, integration, packaging), not research questions. | ≥1 assumption about effort/timeline; ≥1 missing_dependency. | "Six months of engineering away." |
-| **F3** | **Research-dependent** — at least one missing dependency is an open research question. | Components supported. ≥1 missing_dependency must be a research question (no known solution in KB). | ≥1 assumption about research outcome. | "Requires a breakthrough in X." |
-| **F4** | **Speculative** — the scenario rests on assumptions that are not grounded in current evidence; the `critique` field is mandatory. | Evidence may be thin or indirect. | Multiple assumptions; the `critique` must enumerate risks and what would invalidate the scenario. | "What if …" — explicitly labeled as speculation. |
+The authoritative definitions (`src/synapse/domain/_base.py:98-105`) are
+preserved unchanged. The table below is G06's binding interpretation of
+what each horizon **requires** for a scenario to be classified into it.
+The key distinction between F0 and F1 is whether the **integration**
+(the specific combination/configuration the scenario proposes) is itself
+documented in the KB, not merely whether the components exist.
 
-### 3.2 Horizon assignment rules (deterministic)
+| Horizon | Meaning | Components | Integration evidence | Missing dependencies | Critique |
+|---------|---------|------------|---------------------|---------------------|----------|
+| **F0** | **Existing** — the specific configuration the scenario describes is documented in the KB today. | Each component has ≥1 SUPPORTED claim. | ≥1 SUPPORTED claim or explicit relationship documenting *this* integration. | None (empty). | Not required. |
+| **F1** | **Possible but uncommon** — the components exist and are documented, but the *integration* the scenario proposes is not evidenced in the KB. | Each component has ≥1 SUPPORTED claim. | None — the combination is unevidenced. | Must contain **at least one explicitly unresolved integration dependency** (see §3.2.1). | Not required. |
+| **F2** | **Near-term engineering** — the components exist; the missing piece is engineering effort (no new research). | Each component has ≥1 SUPPORTED claim. | None (or partial). | ≥1 "engineering" dependency (entity exists in KB with SUPPORTED claim, but the integration relationship is missing); may also contain integration dependencies. | Not required. |
+| **F3** | **Research-dependent** — at least one missing dependency is an open research question. | Components may be SUPPORTED or partially supported. | None (or partial). | ≥1 "research" dependency (entity does not exist in KB, or exists only with HYPOTHESIZED/INFERRED claims). | Not required. |
+| **F4** | **Speculative** — the scenario rests on assumptions not grounded in current evidence. | Any. | Any. | Any (may be empty only if critique explains why). | **Mandatory** (`Scenario._f4_requires_critique` validator). |
+
+**F0 vs F1 — the critical distinction**: an existing set of components
+does NOT prove that their proposed integration exists. F0 requires
+evidence of the *integration itself* (a SUPPORTED claim or an explicit
+relationship documenting the combination). F1 is when the components
+are each SUPPORTED but the integration is unevidenced. This resolves
+the overlap: F0 and F1 are mutually exclusive on the integration-
+evidence axis.
+
+### 3.2 Horizon assignment rules (deterministic, with precedence)
 
 The horizon class of a constructed scenario is **derived from its
-inputs**, not chosen freely by the caller:
+inputs** using the following precedence-ordered rules. The first rule
+that matches determines the horizon. Rules are **mutually exclusive**:
+once a rule matches, lower-precedence rules are not evaluated.
 
-1. If every `capability` has a SUPPORTED claim and every
-   `missing_dependency` is empty → **F0**.
-2. If every `capability` has a SUPPORTED claim, `missing_dependencies`
-   is non-empty, and every missing dependency is classified as
-   "engineering" (deterministic heuristic: the dependency entity exists
-   in the KB with `kind` in {tool, technology, technique} and has a
-   SUPPORTED claim, but the *integration* relationship is missing) →
-   **F2**.
-3. If any `missing_dependency` is classified as "research" (the
-   dependency entity does not exist in the KB, or exists only with
-   HYPOTHESIZED/INFERRED claims) → **F3**.
-4. If the scenario's capabilities are each SUPPORTED but the
-   combination has no evidence and no missing dependencies → **F1**.
-5. If any capability lacks a SUPPORTED claim, or the caller explicitly
-   requests speculation → **F4** (and the mandatory `critique` is
-   populated by the caller or by the evaluation step).
+**Precedence order** (highest first):
 
-The caller may **downgrade** a horizon (make it more speculative: F0 →
-F1 → F2 → F3 → F4) but never **upgrade** it. The
+1. **F4** (highest precedence) — the caller explicitly requests
+   speculation, OR any capability lacks a SUPPORTED claim (gap
+   classification is `NOT_EVIDENCED`, `CONTESTED`, `UNKNOWN`, or the
+   capability entity does not exist in the KB). The mandatory
+   `critique` must be populated (by the caller or the evaluator).
+
+2. **F3** — every capability has a SUPPORTED claim, AND at least one
+   `missing_dependency` is classified as "research" (the dependency
+   entity does not exist in the KB, or exists only with
+   HYPOTHESIZED/INFERRED claims — i.e., gap classification
+   `NOT_EVIDENCED` or `UNKNOWN` for that dependency).
+
+3. **F2** — every capability has a SUPPORTED claim, AND at least one
+   `missing_dependency` is classified as "engineering" (the dependency
+   entity exists in the KB with a SUPPORTED claim, but the integration
+   relationship — e.g., `INTEGRATES_WITH`, `PROVIDES`, `ENABLES` —
+   between the scenario's components and this dependency is missing),
+   AND no missing dependency is classified as "research".
+
+4. **F1** — every capability has a SUPPORTED claim, AND the
+   integration the scenario proposes is **not** evidenced in the KB
+   (no SUPPORTED claim and no explicit relationship documents *this*
+   combination), AND the `missing_dependencies` list contains at least
+   one **explicitly unresolved integration dependency** (§3.2.1). If
+   the integration IS evidenced → F0. If the integration is
+   unevidenced but no integration dependency can be honestly named →
+   **fail closed** (§3.2.2).
+
+5. **F0** (lowest precedence) — every capability has a SUPPORTED
+   claim, AND the integration the scenario describes is documented
+   (≥1 SUPPORTED claim or explicit relationship evidencing *this*
+   combination), AND `missing_dependencies` is empty.
+
+**Negative tests** (mutual exclusivity verification):
+- A scenario with an evidenced integration AND a non-empty
+  `missing_dependencies` → cannot be F0 (rule 5 requires empty
+  missing_deps); must be F2 or F3 depending on the dependency type.
+- A scenario with an unevidenced integration AND no honest
+  integration dependency → cannot be F1 (rule 4 requires ≥1
+  integration dependency); must fail closed or be F4 if the caller
+  explicitly speculates.
+- A scenario where any capability is NOT_EVIDENCED → cannot be F0/F1/
+  F2/F3 (rules 2–5 all require SUPPORTED capabilities); must be F4.
+
+The caller may **downgrade** a horizon (make it more speculative:
+F0 → F1 → F2 → F3 → F4) but never **upgrade** it. The
 `Scenario._non_f0_must_list_missing_deps` and
-`Scenario._f4_requires_critique` validators enforce the constraints.
+`Scenario._f4_requires_critique` validators enforce the frozen
+contract constraints (§3.2.1 explains how F1 satisfies the
+non-F0-requires-missing-deps validator honestly).
+
+#### 3.2.1 F1 and the mandatory `missing_dependencies` validator
+
+The frozen `Scenario` domain record (`src/synapse/domain/scenario.py`)
+requires every non-F0 scenario to have ≥1 `missing_dependency`:
+
+```python
+@model_validator(mode="after")
+def _non_f0_must_list_missing_deps(self) -> Scenario:
+    if self.horizon_class != HorizonClass.F0 and not self.missing_dependencies:
+        raise ValueError(...)
+```
+
+G06 does **not** modify this validator (frozen contract). Instead, G06
+satisfies it **honestly** for F1 scenarios by populating
+`missing_dependencies` with **explicitly unresolved integration
+dependencies**. An integration dependency is a real entity/capability
+ID from the KB that:
+
+(a) exists in the KB (so the ID is traceable, not fabricated), AND
+(b) has a SUPPORTED claim (so it is a real component), AND
+(c) lacks an integration relationship (`INTEGRATES_WITH`, `PROVIDES`,
+    `ENABLES`) to at least one of the scenario's other components
+    (so the integration is genuinely unresolved).
+
+This is the **smallest compatible representation**: it uses an existing
+entity ID (not a new domain field, not a new predicate) and it
+truthfully represents what is missing — the integration itself. The
+`missing_dependencies` list for an F1 scenario is therefore a list of
+real KB entities whose integration into the scenario is unevidenced.
+
+#### 3.2.2 Fail-closed for F1
+
+If the scenario builder cannot honestly name at least one real KB
+entity as an unresolved integration dependency (for example, the
+scenario proposes a combination of components but every pair already
+has an `INTEGRATES_WITH` relationship), the scenario **cannot** be F1
+— it must be F0 (if the integration is fully evidenced) or F4 (if the
+caller insists on speculation despite the evidence). The builder
+**fails closed**: it raises `ValueError("F1 scenario requires at least
+one honestly unresolved integration dependency")` rather than
+fabricating a dependency.
 
 ### 3.3 No time ranges
 
@@ -242,54 +332,121 @@ mission brief).
 **Purpose**: scan the knowledge base for signals of emerging
 technological change.
 
-**Deterministic inputs** (no invented trends):
+#### 4.1.1 Three-layer separation (Correction D)
 
-- **Gap classification changes**: `analyze_gap()` returns
-  `NOT_EVIDENCED`, `CONTESTED`, `CONSTRAINED` entries. A capability
-  that was `NOT_EVIDENCED` in one scan and later becomes
-  `CONSTRAINED` (a dependency was added) is a positive signal.
-  **However**, Synapse has no longitudinal acquisition history, so
-  G06 does NOT compute "rate of change". It reports the *current* gap
-  classification and lets the caller decide whether the signal is
-  emerging.
-- **New entity footprint**: entities whose `evidence_refs` count
-  crossed a threshold (e.g., ≥3 fragments from ≥2 independent sources)
-  since the last scan. Without longitudinal data, this is reported as
-  a snapshot: "this capability now has N fragments from M sources".
-- **Combination density**: capabilities that appear in many
-  `combine_knowledge()` candidates are "centrally connected" — a
-  structural signal of importance.
-- **Contradiction exposure**: capabilities with `CONTESTED` gap
-  classifications are signals of *active disagreement* (which is
-  itself a signal that the field is moving).
-- **Dependency shifts**: relationships added recently
-  (`RelationshipRow.created_at` within a caller-supplied window) that
-  introduce new PROVIDES / DEPENDS_ON / LIMITS edges.
+G06 strictly separates three epistemically distinct layers. No signal
+may cross layers, and each layer is labeled explicitly in the output:
 
-**Output**: a `FutureSignalReport` dict per signal:
+| Layer | What it represents | What it requires | `signal.temporal_type` |
+|-------|-------------------|------------------|------------------------|
+| **1. Current evidence snapshot** | A factual observation of the KB's *current* state. | Only the current KB. | `"snapshot"` |
+| **2. Verified historical change** | A confirmed change between two *persisted, comparable* KB snapshots. | Two persisted snapshot records with matching scope, compared deterministically. | `"verified_change"` |
+| **3. Speculative interpretation** | A caller's interpretation of what *might* be changing. | Caller-supplied hypothesis; labeled as speculation. | `"speculative_interpretation"` |
+
+**Layer 2 is NOT available in G06-T01.** Synapse does not persist
+comparable KB snapshots over time. `analyze_gap()` is a stateless
+snapshot classifier; it does not record its outputs. Therefore G06
+**cannot** report "gap transitions", "growth", or "threshold crossings"
+— these are Layer 2 claims that require persisted comparable
+observations. Any signal that would imply a trend is **rejected** and
+the builder fails closed.
+
+**G06-T01 implements only Layer 1** (snapshot signals). Layer 2 is a
+documented future capability (requires a snapshot-persistence
+infrastructure that does not exist). Layer 3 is available only via
+explicit caller annotation (`POST /future/scenarios` with caller
+assumptions), never via the signal endpoint.
+
+#### 4.1.2 Snapshot signal kinds (Layer 1 only)
+
+Each signal is a factual observation of the current KB. No signal
+implies change over time.
+
+- **Gap classification snapshot**: `analyze_gap()` returns one of six
+  classifications per (capability, candidate) pair: `SUPPORTED`,
+  `PARTIALLY_SUPPORTED`, `NOT_EVIDENCED`, `CONTESTED`,
+  `CONSTRAINED`, `UNKNOWN`. G06 reports the *current* classification.
+  It does NOT claim the classification "changed" — that would be a
+  Layer 2 claim.
+- **Evidence footprint snapshot**: the count of fragments and the
+  count of distinct `source_uri` values currently citing the
+  capability. Reported as a factual count. No threshold-crossing
+  claim.
+- **Combination density snapshot**: the number of
+  `combine_knowledge()` candidates that currently reference the
+  capability. A structural observation of graph centrality, not a
+  trend.
+- **Contradiction exposure snapshot**: capabilities with `CONTESTED`
+  gap classifications. A factual observation of current disagreement,
+  not a claim that disagreement is "increasing".
+- **Dependency graph snapshot**: the current set of `PROVIDES` /
+  `DEPENDS_ON` / `LIMITS` edges incident to the capability. No
+  "dependency shift" signal — that would be Layer 2.
+
+**Removed signal kinds** (versus G06-P00): `gap_transition` and
+`dependency_shift` are **removed**. They required Layer 2 (verified
+historical change) which G06-T01 cannot provide. The
+`new_capability` kind is renamed to `evidence_footprint_snapshot` to
+avoid implying novelty.
+
+#### 4.1.3 Source independence — conservative handling (Correction D)
+
+**Distinct source URLs are NOT independent origins.** Mirrors,
+reposts, and syndicated copies may have different URLs but share the
+same primary origin. The existing `verification.py`
+`_count_independent_primary_origins()` function
+(`src/synapse/application/verification.py:432-465`) **always returns
+1** (conservative default, per PRB-04) because explicit provenance
+metadata (publisher, author) is not reliably available.
+
+G06 follows the same conservative policy:
+
+- The signal reports `distinct_source_uri_count` (a factual count of
+  distinct `EvidenceFragmentRow.source_uri` values). This is labeled
+  **"distinct URL count"**, not "source independence".
+- The signal reports `independent_origin_count = 1` (conservative,
+  per PRB-04) unless explicit provenance metadata (distinct
+  `SourceRow.publisher` or `SourceRow.author`) is available and
+  differs. If provenance metadata is absent or identical,
+  `independent_origin_count = 1`.
+- The signal **never** claims "N independent sources" based on URL
+  count alone.
+
+#### 4.1.4 Signal output schema
 
 ```python
 {
     "signal_id": "sig-...",
-    "kind": "new_capability" | "combination_density" |
-            "contradiction_exposure" | "dependency_shift" |
-            "gap_transition",
+    "temporal_type": "snapshot",          # always "snapshot" in G06-T01
+    "kind": "gap_classification_snapshot" |
+            "evidence_footprint_snapshot" |
+            "combination_density_snapshot" |
+            "contradiction_exposure_snapshot" |
+            "dependency_graph_snapshot",
     "entity_id": "ent-..." | None,
     "capability_id": "cap-..." | None,
-    "evidence_refs": ["frag-...", ...],
-    "gap_classification": "not_evidenced" | "contested" | "constrained" | None,
-    "combination_count": int,            # how many combine_knowledge candidates reference this
-    "source_independence": int,          # distinct source_uri count
-    "first_seen_at": "ISO8601",          # earliest evidence_refs.retrieved_at
-    "last_seen_at": "ISO8601",           # latest evidence_refs.retrieved_at
-    "snapshot_only": True,               # explicitly flag: no trend inferred
+    "evidence_refs": ["frag-...", ...],  # fragments currently citing this
+    "gap_classification": "supported" | "partially_supported" |
+                          "not_evidenced" | "contested" |
+                          "constrained" | "unknown" | None,
+    "combination_count": int,            # current combine_knowledge candidate count
+    "distinct_source_uri_count": int,    # factual count of distinct URLs (NOT independence)
+    "independent_origin_count": 1,       # conservative (PRB-04); 1 unless proven otherwise
+    "first_seen_at": "ISO8601",          # earliest evidence_refs.retrieved_at (factual)
+    "last_seen_at": "ISO8601",           # latest evidence_refs.retrieved_at (factual)
+    "snapshot_only": True,               # always True in G06-T01
     "notes": "...",                      # deterministic human-readable summary
 }
 ```
 
-**Critical invariant**: `snapshot_only=True` on every signal. G06
-never claims a trend. The `first_seen_at` / `last_seen_at` pair is
-a factual observation of the evidence footprint, not a growth curve.
+**Critical invariants**:
+- `snapshot_only == True` on every signal in G06-T01.
+- `temporal_type == "snapshot"` on every signal in G06-T01.
+- No `growth_rate`, `trend`, `delta`, or `change` field exists.
+- `first_seen_at` / `last_seen_at` are factual observations of the
+  evidence footprint's timestamp range, not a growth curve.
+- `independent_origin_count` is conservative (1) unless explicit
+  provenance metadata proves otherwise.
 
 ### 4.2 Capability B — Scenario Construction (answers Q-B)
 
@@ -368,19 +525,28 @@ encode them in the domain.
 **Purpose**: produce a structured, deterministic evaluation of a
 persisted scenario.
 
-**Evaluation axes** (each a deterministic sub-score in [0.0, 1.0] or
-a categorical label):
+**Evaluation axes** (each a deterministic, transparent dimension —
+**not** a calibrated probability. Each axis is reported with its raw
+deterministic computation. No axis is combined into a single
+"score"):
 
-| Axis | Deterministic computation |
-|------|---------------------------|
-| **Evidence coverage** | `|current_evidence_refs ∩ KB_verified_fragments| / |current_evidence_refs|`. If 0 evidence refs → 0.0. |
-| **Source independence** | `|distinct(source_uri) for ref in current_evidence_refs|`. Reported as a count, not normalized. |
-| **Dependency readiness** | `|missing_dependencies that are "engineering" (F2-tractable)| / |missing_dependencies|`. 1.0 = all engineering; 0.0 = all research. |
-| **Contradiction exposure** | `count(CONTESTED claims among current_evidence_refs)`. Reported as a count. |
-| **Assumption load** | `|assumptions|`. Reported as a count; higher = more speculative. |
-| **Assumption sensitivity** | For each assumption, check whether the KB contains any contradicting evidence. If yes, the assumption is "contested". Report `contested_assumptions` count. |
-| **Scenario consistency** | Cross-check: does any `current_evidence_refs` fragment directly contradict any `assumption`? If yes → `inconsistent`. Binary flag. |
-| **Horizon alignment** | Does the derived `horizon_class` match the caller's override (if any)? If the caller tried to upgrade, report `horizon_violation`. |
+| Axis | Deterministic computation | Type |
+|------|---------------------------|------|
+| **Evidence coverage** | `|current_evidence_refs ∩ KB_verified_fragments| / |current_evidence_refs|`. If 0 evidence refs → 0.0. | ratio in [0.0, 1.0] |
+| **Distinct source URL count** | `|distinct(source_uri) for ref in current_evidence_refs|`. | integer count |
+| **Independent origin count** | Conservative: `1` (per PRB-04) unless explicit `SourceRow.publisher`/`author` metadata differs. | integer count (≤ distinct URL count) |
+| **Dependency readiness** | `|missing_dependencies classified "engineering"| / |missing_dependencies|`. `1.0` = all engineering; `0.0` = all research; `null` if no missing deps. | ratio in [0.0, 1.0] or null |
+| **Contradiction exposure** | `count(CONTESTED claims among current_evidence_refs)`. | integer count |
+| **Assumption load** | `|assumptions|`. | integer count |
+| **Contested assumptions** | For each assumption, check whether the KB contains contradicting evidence. Count of contested assumptions. | integer count |
+| **Scenario consistency** | Does any `current_evidence_refs` fragment directly contradict any `assumption`? | binary: `"consistent"` / `"inconsistent"` |
+| **Horizon alignment** | Does the derived `horizon_class` match the caller's override? If the caller tried to upgrade → `"horizon_violation"`. | binary: `"aligned"` / `"horizon_violation"` |
+| **Horizon class** | The scenario's `horizon_class` (F0–F4). | categorical (F0–F4) |
+
+**No single "score"**. The `overall` field is a categorical label
+derived from the axes (e.g., `inconsistent` if any contradiction;
+`speculative` if horizon=F4; `needs_more_evidence` if
+`evidence_coverage < 0.5; `testable` otherwise).
 
 **Output**: a `ScenarioEvaluation` dict:
 
@@ -388,24 +554,25 @@ a categorical label):
 {
     "scenario_id": "scn-...",
     "evaluated_at": "ISO8601",
-    "evidence_coverage": 0.75,
-    "source_independence": 2,
-    "dependency_readiness": 0.5,
-    "contradiction_exposure": 0,
-    "assumption_load": 3,
-    "contested_assumptions": 1,
-    "consistency": "consistent",  # or "inconsistent"
-    "horizon_alignment": "aligned",  # or "horizon_violation"
+    "evidence_coverage": 0.75,            # ratio
+    "distinct_source_uri_count": 3,       # integer (NOT "independence")
+    "independent_origin_count": 1,        # conservative (PRB-04)
+    "dependency_readiness": 0.5,          # ratio or null
+    "contradiction_exposure": 0,          # integer
+    "assumption_load": 3,                 # integer
+    "contested_assumptions": 1,           # integer
+    "consistency": "consistent",          # or "inconsistent"
+    "horizon_alignment": "aligned",       # or "horizon_violation"
+    "horizon_class": "F2",                # categorical
     "overall": "testable" | "needs_more_evidence" | "speculative" | "inconsistent",
-    "reasoning": "...",  # deterministic human-readable summary
-    "criteria_evaluated": [...],  # per-criterion breakdown
+    "reasoning": "...",                   # deterministic human-readable summary
+    "criteria_evaluated": [...],          # per-criterion breakdown
 }
 ```
 
-**No single "score"**. The `overall` field is a categorical label
-derived from the axes (e.g., `inconsistent` if any contradiction;
-`speculative` if horizon=F4; `needs_more_evidence` if
-evidence_coverage < 0.5; `testable` otherwise).
+**The `uncertainty` field** on the `Scenario` domain record is
+populated from `evidence_coverage` only (see §7.2 for the corrected
+semantics). It is **not** a probability of future occurrence.
 
 ### 4.5 Capability E — Scenario Monitoring & Revision (answers Q-E)
 
@@ -447,30 +614,118 @@ worker that calls the same reassess endpoint on a schedule.)
 **Purpose**: feed G06 scenario outputs back into G05 innovation
 decisions.
 
-**Linkages** (all preserve G05 contracts):
+#### 4.6.1 Verified G05 contract constraints (Correction E)
+
+Source-code inspection of `plan_experiment()`
+(`src/synapse/application/experiment_planner.py:779-868`) revealed
+**three binding constraints** that G06 must respect:
+
+1. **`plan_experiment(session, hypothesis_id, ...)` requires a
+   `hypothesis_id`** that resolves to a persisted `ClaimRow`. The
+   hypothesis's `subject_ref` must point at a **persisted innovation
+   concept entity** (kind="project"), and `plan_experiment` calls
+   `critique_innovation(session, concept_id)` to load critique
+   context. A scenario entity (kind="scenario") does **not** satisfy
+   this contract — it lacks the innovation attributes
+   (`problem_domain`, `uncertainties`, `components`) that
+   `plan_experiment` reads.
+
+2. **`metrics` is `dict[str, Any]` — a `{name: dtype}` schema**, not
+   a list of entity IDs. Missing dependencies are entity/capability
+   references; they are **not** measurement protocols. The previous
+   G06-P00 statement "the scenario's `missing_dependencies` become
+   the metrics to measure" was **incorrect** and is retracted. G06
+   must not treat missing dependencies as numerical metrics without a
+   defined measurement protocol.
+
+3. **Only 16 relationship predicates are supported**
+   (`src/synapse/domain/relationship.py:21-37`): PROVIDES, REQUIRES,
+   ENABLES, IMPROVES, LIMITS, INTEGRATES_WITH, REPLACES, DEPENDS_ON,
+   SUPPORTS, CONTRADICTS, VALIDATES, INVALIDATES, INSPIRED_BY,
+   USEFUL_FOR, TESTS, PRODUCES. The previous G06-P00 plan invented
+   `SCENARIO_DERIVES_FROM`, `SCENARIO_PROTOTYPED_BY`, and
+   `SCENARIO_DEPENDS_ON` — these **do not exist** and G06 must not
+   invent them.
+
+#### 4.6.2 Corrected linkages (all preserve G05 contracts)
 
 1. **Future-capability-gap annotation**: when a scenario identifies a
    `missing_dependency` that is also a G05 `combine_knowledge()`
-   candidate component, the scenario can annotate the innovation
-   concept with a `future_risk` note. This is a new
-   `AuditEventRow(event_type="innovation.future_annotation")` — it
-   does NOT modify the innovation's persisted attributes.
+   candidate component, the scenario annotates the innovation concept
+   with a `future_risk` note via a new
+   `AuditEventRow(event_type="scenario.innovation_annotation")` with
+   `target_id = <innovation_concept_id>`. This does NOT modify the
+   innovation's persisted attributes — it is an append-only audit
+   annotation. (The previous `event_type="innovation.future_annotation"`
+   is renamed to `scenario.innovation_annotation` to clarify that the
+   scenario is the actor, not the innovation.)
+
 2. **Emerging-opportunity flag**: when a scenario's
-   `dependency_readiness` crosses a threshold (e.g., 1.0 = all
-   engineering-tractable), the scenario can be flagged as
-   "emerging_opportunity" in its `risks` dict. G05
-   `discover_opportunities()` results can be cross-referenced.
-3. **Experiment proposal**: the existing `POST /future/scenarios/{id}/
-   prototype-plan` endpoint (declared as a 501 placeholder) calls
-   `plan_experiment()` with the scenario's `prototype_plan` as the
-   protocol and the scenario's `missing_dependencies` as the metrics
-   to measure. The experiment is linked to the scenario via a
-   `SCENARIO_PROTOTYPED_BY` relationship.
-4. **Innovation timing**: a scenario at F2 (near-term engineering)
-   that shares capabilities with a G05 innovation concept suggests
-   the innovation is "timely". A scenario at F4 (speculative)
-   suggests the innovation is "ahead of its time". These are notes,
-   not gates — G05's existing contracts are unchanged.
+   `dependency_readiness` is `1.0` (all missing dependencies are
+   engineering-tractable) AND `evidence_coverage >= 0.5`, the scenario
+   is flagged `"emerging_opportunity": true` in its `risks` dict. This
+   is a deterministic boolean, not a threshold-crossing claim (no
+   Layer 2 temporal signal).
+
+3. **Prototype plan — two-mode design** (corrected): the
+   `POST /future/scenarios/{id}/prototype-plan` endpoint operates in
+   one of two modes, determined by the scenario's linkage to a G05
+   innovation:
+
+   - **Mode A — linked innovation exists**: if the scenario is linked
+     to a G05 innovation concept via an existing `INSPIRED_BY` or
+     `SUPPORTS` relationship (created by the caller or by the
+     scenario builder), and that innovation has a persisted
+     hypothesis (`ClaimRow` with `subject_ref = <concept_id>`), the
+     endpoint delegates to `plan_experiment(session, hypothesis_id,
+     protocol=scenario.prototype_plan, metrics=<caller-supplied>)`.
+     The `metrics` MUST be supplied by the caller as a
+     `{name: dtype}` dict — G06 does NOT fabricate metrics from
+     `missing_dependencies`. The linkage is recorded via an existing
+     predicate (`TESTS` — the scenario tests the innovation) or via
+     an `AuditEventRow(event_type="scenario.prototype_linked")`
+     referencing both the scenario and the experiment.
+
+   - **Mode B — no linked innovation**: if the scenario has no linked
+     G05 innovation concept, the endpoint **cannot** call
+     `plan_experiment` (it would fail the hypothesis resolution). In
+     this mode, the endpoint returns a **prototype plan proposal** —
+     a structured dict containing the scenario's `prototype_plan`,
+     the `missing_dependencies` (as entity references to investigate,
+     NOT as metrics), and a note that the caller must create a G05
+     innovation + hypothesis first if they want a persisted
+     experiment. The proposal is recorded as
+     `AuditEventRow(event_type="scenario.prototype_proposed")`. No
+     `Experiment` entity is created in Mode B.
+
+   This two-mode design preserves `plan_experiment`'s contract
+   (hypothesis_id + innovation concept resolution) while still
+   delivering value for scenarios that are not yet linked to an
+   innovation.
+
+4. **Innovation timing note**: a scenario at F2 (near-term
+   engineering) that shares capabilities with a G05 innovation
+   concept suggests the innovation is "timely". A scenario at F4
+   (speculative) suggests the innovation is "ahead of its time".
+   These are notes in the `risks` dict, not gates — G05's existing
+   contracts are unchanged. The timing note is recorded as an
+   `AuditEventRow(event_type="scenario.innovation_annotation")` with
+   `target_id = <innovation_concept_id>`.
+
+#### 4.6.3 Scenario-to-experiment linkage options (Correction E)
+
+G06 uses **existing relationships or audit references** for
+scenario-to-experiment linkage — no new predicates:
+
+| Linkage | Mechanism | Existing predicate / audit |
+|---------|-----------|---------------------------|
+| Scenario → innovation concept | `INSPIRED_BY` (scenario is INSPIRED_BY innovation) or `SUPPORTS` (scenario SUPPORTS the innovation's hypothesis) | existing predicates |
+| Scenario → experiment | `AuditEventRow(event_type="scenario.prototype_linked", target_id=<experiment_id>)` + `payload.scenario_id` | audit reference |
+| Scenario → evidence fragment | `current_evidence_refs` list in scenario attributes | existing field |
+| Scenario → capability | `capabilities` list in scenario attributes | existing field |
+
+No `SCENARIO_*` predicate is invented. All linkages use either
+existing predicates or audit-event references.
 
 ---
 
@@ -635,19 +890,83 @@ commits on success (fixed in G05-T06).
   scenario's backing hypothesis can move HYPOTHESIZED → SUPPORTED via
   G05-T06 evidence feedback, but never to VERIFIED.
 
-### 7.2 Uncertainty policy
+### 7.2 Uncertainty policy (corrected — Correction C)
 
-- **`uncertainty` field** (already on `Scenario`, range [0.0, 1.0]):
-  G06 populates this **deterministically** from the evaluation:
-  `uncertainty = 1.0 - evidence_coverage`, adjusted by
-  `+0.1 * contested_assumptions` and `+0.1 * (5 - horizon_index)`
-  (more speculative horizons → more uncertain), bounded to [0.0, 1.0].
-- **No probabilistic forecast.** `uncertainty` is a deterministic
-  summary of evidence coverage and assumption load, not a probability
-  of the scenario coming true.
-- **Assumption sensitivity**: each assumption is checked against the
-  KB for contradicting evidence. Contested assumptions are reported
-  by name; the caller decides whether to revise them.
+#### 7.2.1 What `uncertainty` measures
+
+The `uncertainty` field on the `Scenario` domain record (range
+[0.0, 1.0], already defined in `src/synapse/domain/scenario.py:36`)
+is populated **deterministically** as:
+
+```
+uncertainty = 1.0 - evidence_coverage
+```
+
+where `evidence_coverage` is the ratio computed in §4.4 (the fraction
+of `current_evidence_refs` that resolve to verified fragments in the
+KB). This is the **only** input to `uncertainty`.
+
+#### 7.2.2 What `uncertainty` does NOT measure
+
+`uncertainty` is **not**:
+
+- **A probability of future occurrence.** It does not estimate how
+  likely the scenario is to come true. It measures only the current
+  evidence-coverage gap.
+- **A function of the horizon class.** The horizon class (F0–F4) is a
+  **separate** categorical label (§3.1) that describes the *type* of
+  evidence gap (integration unevidenced, engineering missing,
+  research missing, speculative). The horizon does NOT adjust
+  `uncertainty` numerically. The previous G06-P00 formula
+  `+0.1 * (5 - horizon_index)` was **inverted and incorrect** — it
+  would have made F4 (speculative) scenarios appear *more certain*
+  merely because of their class, which is epistemically wrong. More
+  speculative horizons must not appear more certain.
+- **A function of contested assumptions.** Contested assumptions are
+  reported as a separate integer count (`contested_assumptions` in
+  §4.4). They do NOT adjust `uncertainty` numerically. The previous
+  G06-P00 formula `+0.1 * contested_assumptions` introduced arbitrary
+  coefficients presented as calibrated uncertainty; it is removed.
+- **A calibrated or normalized score.** There are no arbitrary
+  coefficients, no weighting, no Bayesian prior. `uncertainty` is a
+  transparent deterministic ratio.
+
+#### 7.2.3 Why a numeric value is retained
+
+The `uncertainty` field is retained (rather than dropped) because:
+
+1. The frozen `Scenario` domain contract already declares it
+   (`uncertainty: float | None = Field(default=None, ge=0.0, le=1.0)`).
+   G06 does not modify frozen contracts.
+2. `1.0 - evidence_coverage` is a transparent, deterministic function
+   of a single evaluation axis. It is easy to explain, audit, and
+   reproduce.
+3. It is labeled explicitly in the API output as
+   `"uncertainty"` with a `"uncertainty_method": "1.0 - evidence_coverage"`
+   field so callers cannot misinterpret it as a probability.
+
+#### 7.2.4 Transparent deterministic dimensions preferred
+
+Where the frozen contract does NOT require a numeric value, G06
+prefers transparent categorical dimensions over arbitrary numeric
+scores. The evaluation axes in §4.4 are reported as:
+- ratios (`evidence_coverage`, `dependency_readiness`)
+- integer counts (`distinct_source_uri_count`,
+  `independent_origin_count`, `contradiction_exposure`,
+  `assumption_load`, `contested_assumptions`)
+- categorical labels (`consistency`, `horizon_alignment`,
+  `horizon_class`, `overall`)
+
+No axis uses arbitrary coefficients. No axis is combined into a
+single "score". The caller sees the raw dimensions and decides.
+
+#### 7.2.5 Assumption sensitivity
+
+Each assumption is checked against the KB for contradicting evidence.
+Contested assumptions are reported by name in the evaluation output
+(`contested_assumptions` count + a `contested_assumption_names` list).
+The caller decides whether to revise them. This is a separate
+dimension from `uncertainty`.
 
 ### 7.3 Provenance policy
 
@@ -759,16 +1078,35 @@ Response 200: { "data": ScenarioEvaluation, "request_id": "..." }
 POST /api/v1/future/scenarios/{scenario_id}/prototype-plan
 Body: {
   "protocol_override": "..." | null,
-  "metrics": {"metric_name": "float", ...}
+  "metrics": {"metric_name": "float", ...}   # caller-supplied {name: dtype} schema
 }
-Response 200: {
+Response 200 (Mode A — linked innovation exists): {
   "data": {
-    "experiment": Experiment,          // from plan_experiment()
-    "relationship_id": "rel-..."       // SCENARIO_PROTOTYPED_BY
+    "mode": "linked_experiment",
+    "experiment": Experiment,               # from plan_experiment()
+    "innovation_concept_id": "innov-...",
+    "hypothesis_id": "hyp-...",
+    "audit_event_id": "aev-..."             # scenario.prototype_linked
   }
 }
-Response 422: scenario is F4 without critique; or no missing_dependencies
+Response 200 (Mode B — no linked innovation): {
+  "data": {
+    "mode": "prototype_proposal",
+    "prototype_plan": "...",                # the scenario's prototype_plan
+    "missing_dependencies": ["ent-...", ...],  # entity refs to investigate (NOT metrics)
+    "note": "No linked G05 innovation. Create an innovation + hypothesis to persist an experiment.",
+    "audit_event_id": "aev-..."             # scenario.prototype_proposed
+  }
+}
+Response 422: scenario is F4 without critique; or Mode A requested
+              but no linked innovation; or metrics missing in Mode A
 ```
+
+**Mode selection**: the endpoint checks whether the scenario has an
+existing `INSPIRED_BY` or `SUPPORTS` relationship to a G05 innovation
+concept with a persisted hypothesis. If yes → Mode A (delegates to
+`plan_experiment`). If no → Mode B (returns a proposal, no experiment
+created). The caller cannot force Mode A without a linked innovation.
 
 ### 9.4 G06-T04 — Reassessment + revision history
 
@@ -825,7 +1163,7 @@ every G06 task.
 | `generate_innovations()` | G06 does NOT call this. G06 annotates existing innovations; it does not regenerate them. |
 | `compose_architecture()` | Not used by G06 (scenarios are not architectures). |
 | `critique_innovation()` | G06 scenario evaluation reuses the critique *pattern* (feasibility, evidence coverage, failure modes) but does NOT call `critique_innovation()` — scenarios and innovations have different evaluation axes. |
-| `plan_experiment()` | **Called by** `POST /future/scenarios/{id}/prototype-plan`. The scenario's `prototype_plan` becomes the experiment's `protocol`; the scenario's `missing_dependencies` become the metrics to measure. |
+| `plan_experiment()` | **Called by** `POST /future/scenarios/{id}/prototype-plan` **only in Mode A** (when the scenario is linked to a G05 innovation with a persisted hypothesis). The scenario's `prototype_plan` becomes the experiment's `protocol`. The `metrics` MUST be caller-supplied as a `{name: dtype}` dict — G06 does NOT fabricate metrics from `missing_dependencies` (Correction E). In Mode B (no linked innovation), the endpoint returns a proposal without calling `plan_experiment`. |
 | `create_execution()`, `record_observation()`, `finalize_execution()` | Not called by G06. A scenario-proposed experiment follows the normal G05-T06 execution flow. |
 | `get_evidence_deltas()` | G06 scenario revision may consult the hypothesis's evidence deltas to detect new supporting/contradicting evidence. |
 
@@ -874,23 +1212,30 @@ overall G06 acceptance gate requires:
 | QG-3 | Non-F0 scenarios have ≥1 `missing_dependency` | `Scenario._non_f0_must_list_missing_deps` validator |
 | QG-4 | No scenario has `epistemic_state="verified"` | `EpistemicState` has no VERIFIED value (type system) |
 | QG-5 | Every `current_evidence_refs` entry is a real fragment ID | Foreign-key-style check in scenario_builder |
-| QG-6 | `uncertainty` is in [0.0, 1.0] | Pydantic field constraint |
+| QG-6 | `uncertainty` is in [0.0, 1.0] and equals `1.0 - evidence_coverage` | Pydantic field constraint + deterministic formula |
 | QG-7 | Horizon override may only downgrade | `scenario_builder` checks `horizon_index(override) >= horizon_index(derived)` |
-| QG-8 | No fabricated trends | `FutureSignalReport.snapshot_only == True` always |
+| QG-8 | No fabricated trends — every signal is `temporal_type="snapshot"` | `FutureSignalReport.temporal_type == "snapshot"` always in G06-T01 |
 | QG-9 | Every revision emits an audit event | `scenario_revision` always inserts `AuditEventRow` |
 | QG-10 | No LLM call in the deterministic core | G06 source has no `import openai` / `import anthropic` / provider calls |
+| QG-11 | F0 and F1 are mutually exclusive on integration evidence | Negative tests: evidenced integration + empty deps → F0; unevidenced integration + integration dep → F1; evidenced integration + non-empty deps → not F0 |
+| QG-12 | F1 requires ≥1 honestly unresolved integration dependency; fail-closed if none | `scenario_builder` raises `ValueError` if F1 derived but no integration dependency can be named |
+| QG-13 | No `gap_transition` or `dependency_shift` signal kinds exist | Source code does not contain these identifiers |
+| QG-14 | `independent_origin_count` is conservative (1) unless provenance metadata differs | `future_signal` checks `SourceRow.publisher`/`author`; defaults to 1 |
+| QG-15 | No `SCENARIO_*` relationship predicate is invented | G06 source uses only the 16 existing predicates from `PREDICATES` |
+| QG-16 | `plan_experiment` is called only in Mode A (linked innovation + hypothesis) | `prototype_plan` endpoint checks for `INSPIRED_BY`/`SUPPORTS` relationship before delegating |
+| QG-17 | `uncertainty` does not depend on `horizon_class` or `contested_assumptions` | `uncertainty == 1.0 - evidence_coverage`; no horizon/assumption coefficients |
 
 ### 11.3 Test coverage
 
 | Capability | Mandatory tests |
 |------------|-----------------|
-| A — Signal identification | ≥8 tests: each signal kind, snapshot_only invariant, evidence threshold, source independence, gap classification propagation, empty KB, deterministic ordering, no fabricated trends. |
-| B — Scenario construction | ≥10 tests: each horizon derivation rule, F4-requires-critique, non-F0-requires-missing-deps, horizon override downgrade-only, idempotent retry (same run_id), alternative futures (different assumptions → different fingerprint), cross-session persistence, invalid signal, invalid capability, provenance preservation. |
+| A — Signal identification | ≥10 tests: each snapshot signal kind, `temporal_type="snapshot"` invariant, `snapshot_only=True` invariant, evidence footprint, gap classification propagation (all 6 types), empty KB, deterministic ordering, no fabricated trends, conservative `independent_origin_count`, `distinct_source_uri_count` ≠ `independent_origin_count`. |
+| B — Scenario construction | ≥12 tests: each horizon derivation rule (F0–F4 with precedence), F4-requires-critique, non-F0-requires-missing-deps, F0-vs-F1 mutual exclusivity on integration evidence, F1 fail-closed (no honest integration dep), horizon override downgrade-only, idempotent retry (same run_id), alternative futures (different assumptions → different fingerprint), cross-session persistence, invalid signal, invalid capability, provenance preservation. |
 | C — Alternative futures | ≥5 tests: comparison dimensions, shared signal, shared evidence, horizon distance, no artificial probabilities. |
-| D — Evaluation | ≥8 tests: each axis, overall label derivation, inconsistent flag, horizon violation, no fabricated evidence, contested assumptions, deterministic output, empty evidence. |
+| D — Evaluation | ≥10 tests: each axis, overall label derivation, inconsistent flag, horizon violation, no fabricated evidence, contested assumptions, deterministic output, empty evidence, `uncertainty == 1.0 - evidence_coverage` (no horizon/assumption adjustment), `independent_origin_count` conservative. |
 | E — Revision | ≥6 tests: explicit reassess, new evidence trigger, new experiment result trigger, no-change (revised=false), revision history ordering, prior version preserved. |
-| F — G05 linkage | ≥5 tests: prototype plan delegates to plan_experiment, SCENARIO_PROTOTYPED_BY relationship, future_risk annotation, emerging_opportunity flag, innovation timing note. |
-| API + OpenAPI | ≥6 tests: each endpoint auth, 404, 422, 200, OpenAPI schema includes all 7 routes. |
+| F — G05 linkage | ≥7 tests: Mode A prototype plan delegates to `plan_experiment` (with caller-supplied metrics), Mode B returns proposal (no experiment), `INSPIRED_BY`/`SUPPORTS` linkage, `scenario.innovation_annotation` audit event, `emerging_opportunity` flag (deterministic boolean), innovation timing note, no `SCENARIO_*` predicate used. |
+| API + OpenAPI | ≥6 tests: each endpoint auth, 404, 422, 200, OpenAPI schema includes all 7 routes, Mode A vs Mode B response shapes. |
 | Regression | Full deterministic suite + combined PG suite pass. |
 
 ---
@@ -982,20 +1327,30 @@ for signals of emerging technological change.
 - `tests/integration/test_g06_t01_future_signals.py` (~350 LOC)
 
 **Mandatory tests**:
-1. Each signal kind produces a well-formed `FutureSignalReport`.
-2. `snapshot_only == True` on every signal.
-3. Evidence threshold respected.
-4. Source independence computed correctly.
-5. Gap classification propagated from `analyze_gap()`.
+1. Each snapshot signal kind produces a well-formed `FutureSignalReport`
+   with `temporal_type="snapshot"`.
+2. `snapshot_only == True` AND `temporal_type == "snapshot"` on every
+   signal.
+3. Evidence footprint snapshot reports factual fragment count and
+   `distinct_source_uri_count`.
+4. `independent_origin_count` is conservative (1) unless explicit
+   `SourceRow.publisher`/`author` metadata differs; never equals
+   `distinct_source_uri_count` unless provenance is verified.
+5. Gap classification propagated from `analyze_gap()` (all 6 types:
+   supported, partially_supported, not_evidenced, contested,
+   constrained, unknown).
 6. Combination density computed from `combine_knowledge()`.
 7. Empty KB → empty signals list (no fabricated signals).
 8. Deterministic ordering (same KB → same signal order).
-9. No fabricated trends: `first_seen_at` / `last_seen_at` are
-   factual; no growth rate field exists.
-10. Provenance: every signal references real entity/capability IDs.
+9. No fabricated trends: no `growth_rate`, `trend`, `delta`, or
+   `change` field exists; `first_seen_at` / `last_seen_at` are
+   factual timestamp ranges, not growth curves.
+10. No `gap_transition` or `dependency_shift` signal kinds exist
+    (removed — they required Layer 2 temporal data).
+11. Provenance: every signal references real entity/capability IDs.
 
 **Acceptance criteria**:
-- All 10 tests pass.
+- All 11 tests pass.
 - `ruff check` clean.
 - Full deterministic regression still passes.
 - No production code outside `src/synapse/application/future_signal.py`
@@ -1042,24 +1397,33 @@ API layer for signals and scenarios.
 - `tests/integration/test_g06_t02_scenario_construction.py` (~450 LOC)
 
 **Mandatory tests**:
-1. F0 scenario: all capabilities SUPPORTED, no missing deps.
-2. F1 scenario: all capabilities SUPPORTED, no missing deps, but
-   combination unevidenced.
-3. F2 scenario: missing deps are all "engineering".
-4. F3 scenario: ≥1 missing dep is "research".
-5. F4 scenario: critique mandatory.
-6. Horizon override downgrade OK; upgrade → 422.
-7. Idempotent retry (same `run_id` → same `scenario_id`).
-8. Alternative futures: different assumptions → different fingerprint.
-9. Cross-session persistence (POST then GET from separate session).
-10. Invalid signal → 404; invalid capability → 404.
-11. Empty assumptions → 422.
-12. Provenance: `created_by`, `created_at`, `request_id` preserved.
-13. API auth: no token → 401.
-14. OpenAPI includes all new routes.
+1. F0 scenario: all capabilities SUPPORTED, integration evidenced
+   (SUPPORTED claim or explicit relationship), no missing deps.
+2. F1 scenario: all capabilities SUPPORTED, integration unevidenced,
+   ≥1 honest integration dependency (real KB entity lacking
+   `INTEGRATES_WITH`/`PROVIDES`/`ENABLES` to other components).
+3. F1 fail-closed: integration unevidenced but no honest integration
+   dependency can be named → `ValueError` (no fabricated dependency).
+4. F0-vs-F1 mutual exclusivity: evidenced integration + empty deps →
+   F0; unevidenced integration + integration dep → F1; evidenced
+   integration + non-empty deps → not F0 (must be F2/F3).
+5. F2 scenario: missing deps are all "engineering" (entity exists with
+   SUPPORTED claim, integration relationship missing).
+6. F3 scenario: ≥1 missing dep is "research" (entity absent or
+   HYPOTHESIZED/INFERRED only).
+7. F4 scenario: critique mandatory; caller-requested speculation → F4.
+8. Horizon override downgrade OK; upgrade → 422.
+9. Idempotent retry (same `run_id` → same `scenario_id`).
+10. Alternative futures: different assumptions → different fingerprint.
+11. Cross-session persistence (POST then GET from separate session).
+12. Invalid signal → 404; invalid capability → 404.
+13. Empty assumptions → 422.
+14. Provenance: `created_by`, `created_at`, `request_id` preserved.
+15. API auth: no token → 401.
+16. OpenAPI includes all new routes.
 
 **Acceptance criteria**:
-- All 14 tests pass.
+- All 16 tests pass.
 - `ruff check` clean.
 - `make openapi-check` passes.
 - Full deterministic regression still passes.
@@ -1080,11 +1444,15 @@ G06-T03.
 endpoint (Capability F linkage).
 
 **Existing components reused**:
-- `plan_experiment()` — the prototype-plan endpoint delegates to this.
+- `plan_experiment()` — called **only in Mode A** (linked innovation +
+  hypothesis). G06 does NOT bypass its hypothesis/concept resolution.
 - `assess_claim()` — for evidence verification.
 - `analyze_gap()` — for dependency readiness.
-- `RelationshipService` — for `SCENARIO_PROTOTYPED_BY` relationship.
-- `AuditEventRow` (event_type="scenario.evaluated") — audit.
+- `RelationshipService` — for `INSPIRED_BY`/`SUPPORTS` linkage checks
+  (existing predicates only; no `SCENARIO_*` predicate invented).
+- `AuditEventRow` (event_type="scenario.evaluated",
+  "scenario.prototype_linked", "scenario.prototype_proposed") — audit.
+- `claim_fingerprint()` (PRB-03) — for prototype-plan idempotency.
 
 **Implementation boundary**:
 - New file: `src/synapse/application/scenario_evaluator.py`
@@ -1093,13 +1461,14 @@ endpoint (Capability F linkage).
 - No new domain records.
 - No new ORM tables.
 - No new migrations.
+- No new relationship predicates (use only the 16 existing ones).
 
 **Expected files**:
 - `src/synapse/application/scenario_evaluator.py` (~350 LOC)
-- `tests/integration/test_g06_t03_evaluation_prototype.py` (~400 LOC)
+- `tests/integration/test_g06_t03_evaluation_prototype.py` (~450 LOC)
 
 **Mandatory tests**:
-1. Each evaluation axis computed correctly.
+1. Each evaluation axis computed correctly (ratio/count/categorical).
 2. `overall` label derivation (testable / needs_more_evidence /
    speculative / inconsistent).
 3. `inconsistent` flag when evidence contradicts an assumption.
@@ -1107,19 +1476,33 @@ endpoint (Capability F linkage).
 5. No fabricated evidence (empty refs → coverage 0.0).
 6. Contested assumptions reported by name.
 7. Deterministic output (same scenario → same evaluation).
-8. Prototype plan delegates to `plan_experiment()`.
-9. `SCENARIO_PROTOTYPED_BY` relationship created.
-10. F4 scenario without critique → 422 on prototype-plan.
-11. Scenario with no missing_dependencies → 422 on prototype-plan
-    (nothing to test).
-12. API auth + 404 + 422.
-13. OpenAPI includes new routes.
+8. `uncertainty == 1.0 - evidence_coverage` — no horizon/assumption
+   coefficients (Correction C).
+9. `independent_origin_count` conservative (1) unless provenance
+   metadata differs; `distinct_source_uri_count` reported separately.
+10. Mode A prototype plan: linked innovation exists → delegates to
+    `plan_experiment()` with caller-supplied `metrics` (NOT
+    missing_dependencies); `scenario.prototype_linked` audit event
+    emitted; no `SCENARIO_*` predicate used.
+11. Mode B prototype plan: no linked innovation → returns proposal
+    (no experiment created); `scenario.prototype_proposed` audit
+    event emitted; `missing_dependencies` listed as entity refs to
+    investigate (NOT metrics).
+12. Mode A without caller-supplied metrics → 422 (G06 does not
+    fabricate metrics from missing_dependencies).
+13. F4 scenario without critique → 422 on prototype-plan.
+14. API auth + 404 + 422.
+15. OpenAPI includes new routes; Mode A vs Mode B response shapes
+    documented.
 
 **Acceptance criteria**:
-- All 13 tests pass.
+- All 15 tests pass.
 - `ruff check` clean.
 - `make openapi-check` passes.
 - Full deterministic regression still passes.
+- No `SCENARIO_*` predicate in G06 source (grep-verified).
+- `plan_experiment` is called only when a linked innovation + hypothesis
+  resolves (Mode A); never called in Mode B.
 
 **Dependencies**: G06-T02 (scenarios must exist to be evaluated).
 
@@ -1195,16 +1578,20 @@ begin G07 without explicit reviewer authorization.
 
 | Task | Title | LOC estimate | Tests | STOP gate |
 |------|-------|-------------|-------|-----------|
-| G06-T01 | Future Signal Identification | ~650 | 10 | Yes |
-| G06-T02 | Scenario Construction + API | ~1100 | 14 | Yes |
-| G06-T03 | Scenario Evaluation + Prototype Plan | ~750 | 13 | Yes |
+| G06-T01 | Future Signal Identification | ~650 | 11 | Yes |
+| G06-T02 | Scenario Construction + API | ~1100 | 16 | Yes |
+| G06-T03 | Scenario Evaluation + Prototype Plan | ~800 | 15 | Yes |
 | G06-T04 | Scenario Revision + E2E Acceptance | ~800 | 12 | Yes (G06 closure) |
-| **Total** | | **~3300** | **49** | |
+| **Total** | | **~3350** | **54** | |
 
 This is a **compact** implementation. For comparison, G05 was ~5000
 LOC across 6 tasks. G06 is smaller because it **reuses** G04/G05
-heavily and adds no new domain contracts, no new ORM tables, and no
-new migrations.
+heavily and adds no new domain contracts, no new ORM tables, no new
+migrations, and no new relationship predicates.
+
+The four-task structure is **preserved** (Correction F). No task was
+added or removed. The corrections only refined acceptance criteria
+within existing tasks.
 
 ---
 
@@ -1212,46 +1599,204 @@ new migrations.
 
 | Question | Answer |
 |----------|--------|
-| Does G06 provide genuine future intelligence rather than generic speculative text? | **Yes.** Every scenario is grounded in `current_evidence_refs` and `missing_dependencies` derived from the KB. F4 scenarios require a critique. `snapshot_only=True` on every signal prevents fabricated trends. |
+| Does G06 provide genuine future intelligence rather than generic speculative text? | **Yes.** Every scenario is grounded in `current_evidence_refs` and `missing_dependencies` derived from the KB. F4 scenarios require a critique. `temporal_type="snapshot"` on every signal prevents fabricated trends. |
 | Are evidence, inference, and speculation clearly separated? | **Yes.** Evidence = `current_evidence_refs` (fragments). Inference = horizon derivation from gap classifications. Speculation = F4 with mandatory critique. The three are never conflated. |
-| Can scenarios be constructed without inventing unavailable historical data? | **Yes.** G06 uses only the current KB snapshot. `first_seen_at`/`last_seen_at` are factual observations of evidence fragments, not growth curves. No longitudinal data is fabricated. |
+| Can scenarios be constructed without inventing unavailable historical data? | **Yes.** G06 uses only the current KB snapshot (Layer 1). Layer 2 (verified historical change) is explicitly unavailable — no `gap_transition` or `dependency_shift` signals exist. `first_seen_at`/`last_seen_at` are factual timestamp ranges, not growth curves. |
 | Are assumptions explicit and testable? | **Yes.** Assumptions are a mandatory list of strings. Each assumption is checked against the KB for contradicting evidence (`contested_assumptions`). The caller can revise assumptions and re-evaluate. |
 | Can scenarios be revised when evidence changes? | **Yes.** G06-T04 implements explicit reassessment with append-only revision history. Prior versions are preserved. |
-| Does G06 reuse G04/G05 rather than duplicate their reasoning? | **Yes.** §10 documents the consumption. G06 does not call `critique_innovation()` or `answer_query()`; it reuses `analyze_gap()`, `hybrid_retrieve()`, `plan_experiment()`, and `get_evidence_deltas()`. |
-| Is the proposed implementation proportionate to the product's needs? | **Yes.** ~3300 LOC across 4 tasks; no new tables; no new migrations; no new domain contracts; no new infrastructure dependencies. |
+| Does G06 reuse G04/G05 rather than duplicate their reasoning? | **Yes.** §10 documents the consumption. G06 does not call `critique_innovation()` or `answer_query()`; it reuses `analyze_gap()`, `hybrid_retrieve()`, `plan_experiment()` (Mode A only, with caller-supplied metrics), and `get_evidence_deltas()`. |
+| Is the proposed implementation proportionate to the product's needs? | **Yes.** ~3350 LOC across 4 tasks; no new tables; no new migrations; no new domain contracts; no new predicates; no new infrastructure dependencies. |
 | Can the first useful scenario be demonstrated early? | **Yes.** After G06-T02 (the second task), a caller can build and retrieve a scenario. The first useful scenario is demonstrated before evaluation (T03) or revision (T04). |
+| Are F0 and F1 mutually exclusive and deterministic? | **Yes (Correction A).** F0 requires evidenced integration + empty deps; F1 requires unevidenced integration + ≥1 honest integration dependency. Precedence-ordered rules with negative tests enforce mutual exclusivity. F1 fails closed if no honest integration dependency can be named. |
+| Is `uncertainty` transparent and non-probabilistic? | **Yes (Correction C).** `uncertainty = 1.0 - evidence_coverage` — no horizon/assumption coefficients. It is labeled `uncertainty_method` in the API output. It is not a probability of future occurrence. |
+| Are source URLs conflated with independent origins? | **No (Correction D).** `distinct_source_uri_count` is a factual URL count; `independent_origin_count` is conservative (1, per PRB-04) unless provenance metadata differs. The two are reported separately. |
+| Does G06 invent relationship predicates? | **No (Correction E).** G06 uses only the 16 existing predicates from `PREDICATES`. Scenario-to-experiment linkage uses `INSPIRED_BY`/`SUPPORTS`/`TESTS` or audit-event references. |
 
-**All eight questions answered affirmatively.** No feature was
-identified that should be removed or deferred.
+**All twelve questions answered affirmatively.** No feature was
+identified that should be removed or deferred beyond what the
+corrections already removed (`gap_transition`, `dependency_shift`,
+`SCENARIO_*` predicates, horizon/assumption uncertainty coefficients).
 
 ---
 
-## 15. Deliverable summary
+## 15. Deliverable summary (G06-P00C — corrected)
 
 ```
-G06_P00_STATUS = PASS
-AUTHORITATIVE_START_SHA = 3d343b84e70aeea3f65c67ff947c61d94b12c785
-EXISTING_CONTRACTS_VERIFIED = YES
-F0_F4_HORIZONS_VERIFIED = YES
-G06_SCOPE_DEFINED = YES
-EPISTEMIC_POLICY_DEFINED = YES
-ARCHITECTURE_PROPOSED = YES
-IMPLEMENTATION_TASKS_DEFINED = G06-T01 (Future Signal Identification), G06-T02 (Scenario Construction + API), G06-T03 (Scenario Evaluation + Prototype Plan), G06-T04 (Scenario Revision + E2E Acceptance)
+G06_P00C_STATUS = PASS
+AUTHORITATIVE_START_SHA = 5a0582154fb85af6a85fea20e0f214ca5880380b
+F0_F1_CLASSIFICATION = RESOLVED
+SCENARIO_CONTRACT_COMPATIBILITY = PASS
+UNCERTAINTY_SEMANTICS = PASS
+TEMPORAL_SIGNAL_INTEGRITY = PASS
+SOURCE_INDEPENDENCE = PASS
+EXISTING_API_AND_RELATIONSHIP_CONTRACTS = PASS
+FOUR_TASK_PLAN_PRESERVED = YES
 PRODUCTION_CODE_MODIFIED = NO
-MIGRATIONS_CREATED = NO
 PLAN_FILE = reports/G06_FUTURE_INTELLIGENCE_IMPLEMENTATION_PLAN.md
-FINAL_SHA = dd3a74ddbb7c0b0678e734e6ce6a6ee4d55b7a1c
-READY_FOR_ARCHITECTURE_REVIEW = YES
+FINAL_SHA = <populated after commit>
+READY_FOR_G06_T01_REVIEW = YES
 ```
 
 ---
 
-## 16. Stop condition
+## 16. Correction summary (G06-P00C)
 
-G06-P00 is **planning only**. No production code, no migrations, no
-domain-contract changes, no activated API endpoints are produced by
-this task.
+This section documents the five focused corrections applied to the
+G06-P00 plan, their final decisions, and their implications for
+G06-T01–T04.
 
-**Do not begin G06-T01 until ChatGPT reviews and approves this plan.**
+### 16.1 Correction A — F0/F1 classification
 
-The plan is committed and pushed for review.
+**Problem**: F0 (existing configuration) and F1 (possible but uncommon
+combination) overlapped. An existing set of components does not prove
+that their proposed integration exists.
+
+**Decision**: F0 and F1 are now **mutually exclusive on the
+integration-evidence axis**. F0 requires evidence of the *integration
+itself* (a SUPPORTED claim or an explicit relationship documenting the
+combination) AND empty `missing_dependencies`. F1 requires that the
+components are each SUPPORTED but the integration is unevidenced, AND
+that `missing_dependencies` contains ≥1 honestly unresolved
+integration dependency (§3.2.1). Horizon assignment uses precedence-
+ordered rules (F4 > F3 > F2 > F1 > F0) with negative tests (§3.2).
+
+**Implications**:
+- G06-T02 gains 2 new mandatory tests: F0-vs-F1 mutual exclusivity,
+  and F1 fail-closed (no honest integration dependency → ValueError).
+- The `scenario_builder` must check for integration evidence
+  (SUPPORTED claim or `INTEGRATES_WITH`/`PROVIDES`/`ENABLES`
+  relationship) before assigning F0.
+- QG-11 and QG-12 enforce the mutual exclusivity and fail-closed
+  behavior.
+
+### 16.2 Correction B — Scenario contract compatibility
+
+**Problem**: The frozen `Scenario._non_f0_must_list_missing_deps`
+validator requires every non-F0 scenario to have ≥1
+`missing_dependency`. F1 scenarios (possible but uncommon combination)
+may not have a missing dependency, only an unevidenced integration.
+
+**Decision**: G06 does **not** modify the frozen validator. Instead,
+F1 scenarios satisfy the validator **honestly** by populating
+`missing_dependencies` with **explicitly unresolved integration
+dependencies** — real KB entity IDs that (a) exist in the KB, (b)
+have a SUPPORTED claim, and (c) lack an integration relationship to
+the scenario's other components (§3.2.1). If no honest integration
+dependency can be named, the builder **fails closed** (§3.2.2) rather
+than fabricating a dependency.
+
+**Implications**:
+- The `Scenario` domain record is unchanged (frozen contract
+  preserved).
+- F1 scenarios always have ≥1 real, traceable `missing_dependency`.
+- The fail-closed behavior prevents hand-waving futures.
+- This is the smallest compatible representation: no new domain
+  field, no new predicate, no validator modification.
+
+### 16.3 Correction C — Uncertainty semantics
+
+**Problem**: The G06-P00 formula
+`uncertainty = 1.0 - evidence_coverage + 0.1 * contested_assumptions + 0.1 * (5 - horizon_index)`
+was **inverted** — the `+0.1 * (5 - horizon_index)` term would make
+F4 (speculative) scenarios appear *more certain* (lower uncertainty)
+merely because of their class. It also introduced arbitrary
+coefficients presented as calibrated uncertainty.
+
+**Decision**: `uncertainty = 1.0 - evidence_coverage` — the **only**
+input is evidence coverage. No horizon coefficient. No assumption
+coefficient. The field is retained (frozen contract) but is now a
+transparent deterministic ratio. The API output includes
+`uncertainty_method: "1.0 - evidence_coverage"` so callers cannot
+misinterpret it as a probability. §7.2 documents exactly what
+`uncertainty` measures (the evidence-coverage gap) and what it does
+not (probability of occurrence, horizon class, assumption load).
+
+**Implications**:
+- QG-6 and QG-17 enforce the corrected formula.
+- G06-T03 gains a mandatory test: `uncertainty == 1.0 -
+  evidence_coverage` with no horizon/assumption adjustment.
+- The evaluation axes in §4.4 are now all transparent dimensions
+  (ratios, counts, categorical labels) — no arbitrary coefficients.
+
+### 16.4 Correction D — Temporal signals and source independence
+
+**Problem**: G06-P00 claimed `gap_transition` and `dependency_shift`
+signals, which require verified historical change between comparable
+KB snapshots. Synapse does not persist comparable snapshots. G06-P00
+also conflated distinct source URLs with independent origins.
+
+**Decision**:
+- **Three-layer separation** (§4.1.1): Layer 1 (current snapshot),
+  Layer 2 (verified historical change), Layer 3 (speculative
+  interpretation). G06-T01 implements **only Layer 1**. Layer 2 is
+  explicitly unavailable. `gap_transition` and `dependency_shift`
+  signal kinds are **removed**. Every signal has
+  `temporal_type="snapshot"` and `snapshot_only=True`.
+- **Conservative source independence** (§4.1.3): `distinct_source_uri_count`
+  is a factual URL count; `independent_origin_count` is conservative
+  (1, per PRB-04) unless explicit `SourceRow.publisher`/`author`
+  metadata differs. The two are reported separately. No signal claims
+  "N independent sources" based on URL count.
+
+**Implications**:
+- G06-T01 gains a mandatory test: no `gap_transition` or
+  `dependency_shift` signal kinds exist.
+- QG-8, QG-13, QG-14 enforce the temporal-layering and source-
+  independence rules.
+- The signal output schema (§4.1.4) is corrected: `source_independence`
+  is replaced by `distinct_source_uri_count` + `independent_origin_count`.
+
+### 16.5 Correction E — Existing contract compatibility
+
+**Problem**: G06-P00 invented three relationship predicates
+(`SCENARIO_DERIVES_FROM`, `SCENARIO_PROTOTYPED_BY`,
+`SCENARIO_DEPENDS_ON`) that do not exist in the 16-predicate
+vocabulary. G06-P00 also stated that `plan_experiment()` would be
+called with the scenario's `missing_dependencies` as metrics — but
+`plan_experiment` requires a `hypothesis_id` resolving to an
+innovation concept, and `metrics` is a `{name: dtype}` schema, not a
+list of entity IDs.
+
+**Decision**:
+- **No new predicates**. G06 uses only the 16 existing predicates
+  (§4.6.3). Scenario-to-experiment linkage uses `INSPIRED_BY`,
+  `SUPPORTS`, `TESTS`, or audit-event references.
+- **Two-mode prototype-plan endpoint** (§4.6.2): Mode A (linked
+  innovation + hypothesis exists) delegates to `plan_experiment()`
+  with **caller-supplied** `metrics` (G06 does NOT fabricate metrics
+  from `missing_dependencies`). Mode B (no linked innovation) returns
+  a proposal without calling `plan_experiment()`.
+- The `metrics` parameter is explicitly caller-supplied in Mode A;
+  Mode A without metrics → 422.
+
+**Implications**:
+- QG-15 and QG-16 enforce no-new-predicates and Mode-A-only
+  `plan_experiment` delegation.
+- G06-T03 mandatory tests are expanded from 13 to 15 to cover Mode A,
+  Mode B, and the no-fabricated-metrics rule.
+- The API contract (§9.3) documents both Mode A and Mode B response
+  shapes.
+- §10.2 G05 integration table is corrected: `plan_experiment` is
+  called only in Mode A with caller-supplied metrics.
+
+### 16.6 Correction F — Plan update scope
+
+**Decision**: Only affected sections of the plan were revised (§3.1,
+§3.2, §4.1, §4.4, §4.6, §7.2, §9.3, §10.2, §11.2, §11.3, §13.1–13.5,
+§14, §15). The four-task structure (G06-T01–T04) is **preserved** —
+no task was added or removed. Acceptance criteria within tasks were
+refined to reflect the corrections. This new §16 documents the final
+decisions and implications.
+
+---
+
+## 17. Stop condition
+
+G06-P00C is **planning correction only**. No production code, no
+migrations, no domain-contract changes, no activated API endpoints
+are produced by this task.
+
+**Do not begin G06-T01 until ChatGPT reviews and approves the
+corrected plan.**
+
+The corrected plan is committed and pushed for review.

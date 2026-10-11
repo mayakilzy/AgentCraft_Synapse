@@ -5,7 +5,7 @@
 **Starting SHA**: `1f13c2005db232818f04e3426129dbb166557c79`
 **T04 Final SHA**: `2e0cbe8aac8965cdf5c34241278f0a7231a13be5`
 **T04A Authoritative start SHA**: `1f095d483245b47ef52956103bb7b06be70fd0e8`
-**T04A Final SHA**: (populated after commit)
+**T04A Final SHA**: `7d0a09d15b99d488952440083d5fb802770993b9`
 **Date**: 2026-10-11
 **Developer**: GLM
 **Reviewer**: ChatGPT (pending)
@@ -793,7 +793,7 @@ MODIFIED_FILES =
 REMAINING_LIMITATIONS =
   Same as T04 (see §14). No new limitations introduced by T04A.
 
-FINAL_SHA = (populated after commit)
+FINAL_SHA = 7d0a09d15b99d488952440083d5fb802770993b9
 
 G06_READY_FOR_FINAL_CLOSURE = YES
 ```

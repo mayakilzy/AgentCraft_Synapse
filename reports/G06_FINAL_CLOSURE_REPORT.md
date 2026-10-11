@@ -422,7 +422,7 @@ MODIFIED_FILES_IN_G06 =
   G06-T04: src/synapse/application/scenario_revision.py (NEW), src/synapse/api/v1/future.py (MODIFIED), tests/integration/test_g06_t04_revision_e2e.py (NEW)
   G06-T04A: src/synapse/application/scenario_revision.py (MODIFIED — atomic lock + snapshot safety), tests/integration/test_g06_t04_revision_e2e.py (MODIFIED — +9 PG-only T04A tests + _seed_two_fragment_kb_labeled helper)
 
-FINAL_G06_SHA = (populated after final T04A commit)
+FINAL_G06_SHA = 7d0a09d15b99d488952440083d5fb802770993b9 (T04A correction)
 
 READY_FOR_G06_FINAL_REVIEW = YES
 ```

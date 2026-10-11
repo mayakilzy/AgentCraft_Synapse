@@ -9,6 +9,7 @@ from synapse.api.v1 import (
     capability_registry,
     executions,
     experiments,
+    future,
     health,
     hypotheses,
     innovations,
@@ -46,6 +47,9 @@ router.include_router(
 router.include_router(
     hypotheses.router
 )  # G05-T06: GET /hypotheses/{id}/evidence-deltas
+router.include_router(
+    future.router
+)  # G06-T01+T02: POST /future/signals, POST /future/scenarios, GET /future/scenarios/{id}
 router.include_router(knowledge.entities_router)
 router.include_router(knowledge.relationships_router)
 router.include_router(knowledge.claims_router)
@@ -56,8 +60,6 @@ router.include_router(system.jobs_router)
 # but not yet implemented. Each future group will swap these out for real
 # implementations. We expose the *route names* in OpenAPI today so the
 # contract is stable.
-
-from fastapi import status  # noqa: E402
 
 from synapse.api.errors import UnsupportedFeatureError  # noqa: E402
 
@@ -97,25 +99,11 @@ def _not_implemented(feature: str):
 # GET /hypotheses/{id}/evidence-deltas is implemented in G05-T06
 # (src/synapse/api/v1/hypotheses.py). Do not duplicate them here.
 
-# Future scenarios
-_placeholder.add_api_route(
-    "/future/scenarios",
-    _not_implemented("POST /future/scenarios"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/future/scenarios/{scenario_id}",
-    _not_implemented("GET /future/scenarios/{id}"),
-    methods=["GET"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-_placeholder.add_api_route(
-    "/future/scenarios/{scenario_id}/prototype-plan",
-    _not_implemented("POST /future/scenarios/{id}/prototype-plan"),
-    methods=["POST"],
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
+# Future scenarios — implemented in G06-T01 + G06-T02
+# (src/synapse/api/v1/future.py). POST /future/signals, POST /future/scenarios,
+# GET /future/scenarios/{id} are now functional. POST /future/scenarios/{id}/
+# prototype-plan is registered with an explicit 501 (deferred to G06-T03).
+# Do not duplicate them here as placeholders.
 
 
 # Both routers mounted together — main.py also mounts health_router at root.

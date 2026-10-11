@@ -758,15 +758,18 @@ async def test_11_predictable_error_responses(app, client, db_session, auth_head
     body = r.json()
     assert body["error"]["code"] == "validation_error"
 
-    # A genuinely unimplemented route still returns 501.
+    # G06-T02 activated POST /api/v1/future/scenarios — it now returns
+    # 422 (validation error) for an empty body, NOT 501. The only
+    # remaining 501 in the future API is the prototype-plan route
+    # (deferred to G06-T03).
     r = client.post(
         "/api/v1/future/scenarios",
         headers=auth_headers_reader,
         json={},
     )
-    assert r.status_code == 501
+    assert r.status_code == 422
     body = r.json()
-    assert body["error"]["code"] == "not_implemented"
+    assert body["error"]["code"] == "validation_error"
 
 
 # ── Acceptance Test 12: Stable OpenAPI schema generation ──────────────────

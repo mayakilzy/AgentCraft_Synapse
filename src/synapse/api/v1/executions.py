@@ -198,18 +198,17 @@ async def list_executions(
     """List persisted execution records, newest first.
 
     Optional ``experiment_id`` filter: returns only executions whose
-    ``attributes.experiment_id`` matches. The filter is implemented as
-    a portable SQL ``LIKE`` substring match on the JSON ``attributes``
-    column (``LIKE '%"experiment_id": "{experiment_id}"%'``). The
-    pattern has leading and trailing ``%`` wildcards but no inner
-    ``%`` wildcards — SQL ``LIKE`` is anchored, so inner ``%`` would
-    greedily consume characters needed for the literal tail of the
-    pattern.
-    Limitation: in the unlikely case where another field in the
-    execution's attributes JSON happens to contain the experiment_id
-    string in that exact pattern, it would match. The current codebase
-    stores ``experiment_id`` only as a top-level attribute, so the
-    filter is precise in practice.
+    ``attributes.experiment_id`` matches EXACTLY. The filter uses a
+    portable JSON-path extraction (``json_extract`` on SQLite, ``->>``
+    on PostgreSQL) — not a SQL LIKE substring match. The exact match
+    treats ``%``, ``_``, quotes, and other special characters as
+    ordinary data. Only the top-level ``experiment_id`` key is
+    compared; the value will not match if the same ID appears only in
+    a different field (e.g. a ``trigger_ref`` that embeds an
+    experiment_id).
+
+    Per G07-PRE-02A Task A: this replaces the previous SQL LIKE
+    approach which could match substrings and wildcard characters.
 
     Returns a paginated list of execution records filtered to genuine
     persisted executions via the ``EntityFingerprintRow`` discriminator

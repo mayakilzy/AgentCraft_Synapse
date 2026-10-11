@@ -807,10 +807,16 @@ async def test_pagination_stale_cursor_returns_empty_page(
     import base64
     import json as _json
 
-    # Construct a valid cursor pointing to a far-future timestamp and a
-    # non-existent entity ID. This is "stale" in the sense that no rows
-    # exist with created_at <= this cursor.
-    payload = _json.dumps({"ts": "1970-01-01T00:00:00+00:00", "id": "never-existed"}).encode()
+    # Construct a valid cursor (with the G07-PRE-02A kind + filter
+    # fields) pointing to a far-future timestamp and a non-existent
+    # entity ID. This is "stale" in the sense that no rows exist with
+    # created_at <= this cursor.
+    payload = _json.dumps({
+        "ts": "1970-01-01T00:00:00+00:00",
+        "id": "never-existed",
+        "k": "project",
+        "f": None,
+    }).encode()
     cursor = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
     r = client.get(
@@ -1076,6 +1082,326 @@ async def test_regression_existing_get_execution_by_id_still_works(
     assert r.status_code == 200
     body = r.json()
     assert body["data"]["execution_id"] == execution_id
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Part 8b — G07-PRE-02A Task A: Exact execution filtering
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_execution_filter_exact_match_positive(
+    app, client, db_session, auth_headers_admin
+):
+    """The ?experiment_id= filter matches the EXACT top-level experiment_id
+    attribute — positive match.
+    """
+    await _seed_innovation_fixture(db_session)
+    innov = await generate_innovations(db_session, "AI research assistant", context="AI agent systems")
+    await db_session.commit()
+    hypothesis_id = innov["concepts"][0]["hypothesis_id"]
+
+    plan = await plan_experiment(
+        db_session, hypothesis_id,
+        protocol="Exact match test protocol",
+        execution_mode=ExperimentExecutionMode.DRY_RUN,
+        requester="pre02a-tester",
+    )
+    await db_session.commit()
+    exp_id = plan["experiment"]["experiment_id"]
+
+    await create_execution(db_session, exp_id, run_id="run-exact-1", requester="pre02a")
+    await db_session.commit()
+
+    r = client.get(f"/api/v1/executions?experiment_id={exp_id}", headers=auth_headers_admin)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"]["count"] >= 1
+    for item in body["data"]["items"]:
+        assert item["experiment_id"] == exp_id
+
+
+@pytest.mark.asyncio
+async def test_execution_filter_exact_match_negative_substring(
+    app, client, db_session, auth_headers_admin
+):
+    """A substring of the experiment_id must NOT match — the filter is
+    exact, not a LIKE substring.
+    """
+    await _seed_innovation_fixture(db_session)
+    innov = await generate_innovations(db_session, "AI research assistant", context="AI agent systems")
+    await db_session.commit()
+    hypothesis_id = innov["concepts"][0]["hypothesis_id"]
+
+    plan = await plan_experiment(
+        db_session, hypothesis_id,
+        protocol="Substring negative test",
+        execution_mode=ExperimentExecutionMode.DRY_RUN,
+        requester="pre02a-tester",
+    )
+    await db_session.commit()
+    exp_id = plan["experiment"]["experiment_id"]
+
+    await create_execution(db_session, exp_id, run_id="run-sub-1", requester="pre02a")
+    await db_session.commit()
+
+    # Use a substring of exp_id (e.g., first 10 chars) — should NOT match.
+    substring = exp_id[:10]
+    assert len(substring) < len(exp_id), "test setup: substring must be shorter"
+    r = client.get(f"/api/v1/executions?experiment_id={substring}", headers=auth_headers_admin)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"]["count"] == 0
+    assert body["data"]["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_execution_filter_no_collision_with_other_fields(
+    app, client, db_session, auth_headers_admin
+):
+    """If experiment_id appears in a DIFFERENT top-level field (e.g.
+    trigger_ref), the filter must NOT match it — only the exact
+    top-level experiment_id key is compared.
+    """
+    from synapse.storage.models import EntityRow
+
+    await _seed_innovation_fixture(db_session)
+    innov = await generate_innovations(db_session, "AI research assistant", context="AI agent systems")
+    await db_session.commit()
+    hypothesis_id = innov["concepts"][0]["hypothesis_id"]
+
+    plan_a = await plan_experiment(
+        db_session, hypothesis_id,
+        protocol="Collision test A",
+        execution_mode=ExperimentExecutionMode.DRY_RUN,
+        requester="pre02a-tester",
+    )
+    await db_session.commit()
+    exp_a = plan_a["experiment"]["experiment_id"]
+
+    plan_b = await plan_experiment(
+        db_session, hypothesis_id,
+        protocol="Collision test B",
+        execution_mode=ExperimentExecutionMode.DRY_RUN,
+        requester="pre02a-tester",
+    )
+    await db_session.commit()
+    exp_b = plan_b["experiment"]["experiment_id"]
+
+    # Create an execution for exp_a.
+    exec_result = await create_execution(db_session, exp_a, run_id="run-collide-1", requester="pre02a")
+    await db_session.commit()
+    execution_id = exec_result["execution_id"]
+
+    # Manually inject exp_b into a DIFFERENT field (trigger_ref) in the
+    # execution's attributes JSON — simulating a hypothetical scenario
+    # where another field contains an experiment_id.
+    from sqlalchemy import select as sel
+    entity = (await db_session.execute(sel(EntityRow).where(EntityRow.id == execution_id))).scalar_one()
+    import json as _json
+    attrs = _json.loads(entity.attributes)
+    attrs["trigger_ref"] = exp_b  # exp_b appears in trigger_ref, NOT experiment_id
+    entity.attributes = _json.dumps(attrs, default=str)
+    await db_session.commit()
+
+    # Filter by exp_b: should return ZERO executions (exp_b is only in
+    # trigger_ref, not the top-level experiment_id of any execution).
+    r = client.get(f"/api/v1/executions?experiment_id={exp_b}", headers=auth_headers_admin)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["data"]["count"] == 0, (
+        f"filter should NOT match exp_b (only in trigger_ref), got {body['data']['count']} matches"
+    )
+
+    # Filter by exp_a: should return the ONE execution (exp_a is the
+    # top-level experiment_id).
+    r2 = client.get(f"/api/v1/executions?experiment_id={exp_a}", headers=auth_headers_admin)
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2["data"]["count"] >= 1
+    for item in body2["data"]["items"]:
+        assert item["experiment_id"] == exp_a
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Part 8c — G07-PRE-02A Task B: Cursor contract consistency
+# ══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_cursor_cross_resource_reuse_rejected(
+    app, client, db_session, auth_headers_admin
+):
+    """A cursor issued by GET /api/v1/innovations cannot be reused for
+    GET /api/v1/experiments — the resource kind mismatch produces 422.
+    """
+    await _seed_innovation_fixture(db_session)
+    innov = await generate_innovations(db_session, "AI research assistant", context="AI agent systems")
+    await db_session.commit()
+
+    # Get a cursor from the innovations list.
+    r1 = client.get("/api/v1/innovations?limit=1", headers=auth_headers_admin)
+    assert r1.status_code == 200
+    cursor = r1.json()["meta"]["pagination"]["next_cursor"]
+    # If there's only 1 concept, next_cursor is null. Seed more if needed.
+    if cursor is None:
+        # Generate more concepts to ensure a next_cursor is issued.
+        for i in range(3):
+            await generate_innovations(db_session, f"problem variant {i}", context="AI")
+        await db_session.commit()
+        r1 = client.get("/api/v1/innovations?limit=2", headers=auth_headers_admin)
+        cursor = r1.json()["meta"]["pagination"]["next_cursor"]
+    assert cursor is not None, "test setup: need a non-null cursor"
+
+    # Try to reuse the innovations cursor on the experiments endpoint.
+    r2 = client.get(f"/api/v1/experiments?cursor={cursor}", headers=auth_headers_admin)
+    assert r2.status_code == 422
+    body = r2.json()
+    assert body["error"]["code"] == "validation_error"
+    assert "resource kind" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_cursor_cross_filter_reuse_rejected(
+    app, client, db_session, auth_headers_admin
+):
+    """A cursor issued by GET /api/v1/executions?experiment_id=X cannot
+    be reused for GET /api/v1/executions (no filter) or with a different
+    experiment_id — the filter mismatch produces 422.
+    """
+    await _seed_innovation_fixture(db_session)
+    innov = await generate_innovations(db_session, "AI research assistant", context="AI agent systems")
+    await db_session.commit()
+    hypothesis_id = innov["concepts"][0]["hypothesis_id"]
+
+    # Plan 2 experiments with different protocols.
+    plan_a = await plan_experiment(db_session, hypothesis_id, protocol="Filter test A", execution_mode=ExperimentExecutionMode.DRY_RUN, requester="pre02a")
+    await db_session.commit()
+    plan_b = await plan_experiment(db_session, hypothesis_id, protocol="Filter test B", execution_mode=ExperimentExecutionMode.DRY_RUN, requester="pre02a")
+    await db_session.commit()
+    exp_a = plan_a["experiment"]["experiment_id"]
+    exp_b = plan_b["experiment"]["experiment_id"]
+
+    # Create 3 executions for exp_a so we get a non-null cursor.
+    for i in range(3):
+        await create_execution(db_session, exp_a, run_id=f"run-xfilter-{i}", requester="pre02a")
+    await db_session.commit()
+
+    # Get a cursor from the filtered list (experiment_id=exp_a).
+    r1 = client.get(f"/api/v1/executions?experiment_id={exp_a}&limit=2", headers=auth_headers_admin)
+    assert r1.status_code == 200
+    cursor = r1.json()["meta"]["pagination"]["next_cursor"]
+    assert cursor is not None, "test setup: need a non-null cursor"
+
+    # Try to reuse the filtered cursor on the UNFILTERED list.
+    r2 = client.get(f"/api/v1/executions?cursor={cursor}", headers=auth_headers_admin)
+    assert r2.status_code == 422
+    body2 = r2.json()
+    assert body2["error"]["code"] == "validation_error"
+    assert "filter" in body2["error"]["message"].lower()
+
+    # Try to reuse the filtered cursor with a DIFFERENT experiment_id.
+    r3 = client.get(f"/api/v1/executions?experiment_id={exp_b}&cursor={cursor}", headers=auth_headers_admin)
+    assert r3.status_code == 422
+    body3 = r3.json()
+    assert body3["error"]["code"] == "validation_error"
+    assert "filter" in body3["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_cursor_old_format_without_k_rejected(app, client, auth_headers_admin):
+    """A cursor issued by G07-PRE-02 (without the 'k' and 'f' fields)
+    is now INVALID — returns 422. No frontend has been released, so
+    old cursors are explicitly invalidated per G07-PRE-02A §4.
+    """
+    import base64
+    import json as _json
+
+    # Old-format cursor: only ts and id, no k or f.
+    payload = _json.dumps({"ts": "2026-01-01T00:00:00+00:00", "id": "some-id"}).encode()
+    cursor = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    r = client.get(f"/api/v1/innovations?cursor={cursor}", headers=auth_headers_admin)
+    assert r.status_code == 422
+    body = r.json()
+    assert body["error"]["code"] == "validation_error"
+    assert "'k'" in body["error"]["message"]  # mentions the missing 'k' field
+
+
+@pytest.mark.asyncio
+async def test_cursor_invalid_timestamp_rejected(app, client, auth_headers_admin):
+    """A cursor with a syntactically valid base64url + JSON structure but
+    an impossible timestamp value returns 422.
+    """
+    import base64
+    import json as _json
+
+    # Valid structure, invalid timestamp (not ISO 8601).
+    payload = _json.dumps({
+        "ts": "not-a-timestamp",
+        "id": "some-id",
+        "k": "project",
+        "f": None,
+    }).encode()
+    cursor = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    r = client.get(f"/api/v1/innovations?cursor={cursor}", headers=auth_headers_admin)
+    assert r.status_code == 422
+    body = r.json()
+    assert body["error"]["code"] == "validation_error"
+    assert "timestamp" in body["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_cursor_stable_pagination_same_timestamp(
+    app, client, db_session, auth_headers_admin
+):
+    """Pagination is stable across rows with identical created_at
+    timestamps — the id DESC tie-break ensures no rows are skipped
+    or duplicated across pages.
+    """
+    fixture = await _seed_scenario_f0_fixture(db_session)
+
+    # Build 5 scenarios — they will have very close (possibly identical)
+    # created_at timestamps.
+    scenario_ids = []
+    for i in range(5):
+        result = await build_scenario(
+            db_session,
+            capability_ids=fixture["capability_ids"],
+            assumptions=[f"stability assumption {i}"],
+            proposed_combination=f"stability combination {i}",
+            evidence_refs=[fixture["fragment_id"]],
+            run_id=f"run-stab-{i}",
+            requester="pre02a",
+        )
+        await db_session.commit()
+        scenario_ids.append(result["scenario_id"])
+    assert len(set(scenario_ids)) == 5
+
+    # Fetch all 5 with limit=2 — should take 3 pages (2+2+1).
+    seen_ids: set[str] = set()
+    cursor = None
+    for page_num in range(5):  # max 5 pages to prevent infinite loop
+        url = "/api/v1/future/scenarios?limit=2"
+        if cursor:
+            url += f"&cursor={cursor}"
+        r = client.get(url, headers=auth_headers_admin)
+        assert r.status_code == 200
+        body = r.json()
+        page_ids = {item["scenario_id"] for item in body["data"]["items"]}
+        # No duplicates across pages.
+        assert page_ids.isdisjoint(seen_ids), f"page {page_num}: duplicate ids"
+        seen_ids |= page_ids
+        cursor = body["meta"]["pagination"]["next_cursor"]
+        if cursor is None:
+            break
+
+    # All 5 scenarios must be present across the pages.
+    assert seen_ids == set(scenario_ids), (
+        f"missing: {set(scenario_ids) - seen_ids}, extra: {seen_ids - set(scenario_ids)}"
+    )
+
 
 
 # ══════════════════════════════════════════════════════════════════════════

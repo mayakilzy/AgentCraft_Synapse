@@ -4,6 +4,10 @@
 
 Per the corrected G05 plan: these endpoints activate the G04 501
 placeholders for experiment planning (T05) and execution (T06).
+
+G07-PRE-02 (read-only amendments): a new ``GET /api/v1/experiments``
+list endpoint was added. It is read-only (no audit event, no
+mutation) and paginated via the new ``_list_pagination`` module.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from synapse.application.execution_record import create_execution
 from synapse.application.experiment_planner import (
     MAX_BASELINE_CHARS,
     MAX_PROTOCOL_CHARS,
+    get_experiment,
     plan_experiment,
 )
 from synapse.domain.experiment import ExperimentExecutionMode
@@ -162,8 +167,6 @@ async def get_experiment_plan(
     ``result`` field is always ``null`` for a plan -- results are recorded
     by G05-T06 execution.
     """
-    from synapse.application.experiment_planner import get_experiment
-
     plan = await get_experiment(session, experiment_id)
     if plan is None:
         raise NotFoundError(f"experiment {experiment_id!r} not found")
@@ -236,3 +239,81 @@ async def execute_experiment(
         raise NotFoundError(f"experiment {experiment_id!r} not found")
 
     return Envelope.success(data=result, request_id=request_id)
+
+
+# ── G07-PRE-02 — read-only list (paginated) ───────────────────────────────
+#
+# This GET was added by the G07-PRE-02 mission. It is read-only (no
+# audit event, no mutation) and paginated via the new
+# ``_list_pagination`` module. Route ordering is safe: FastAPI matches
+# by HTTP method, and the empty-string path "" only matches the exact
+# prefix ``/api/v1/experiments`` (not ``/api/v1/experiments/{id}``).
+
+
+@router.get("", status_code=status.HTTP_200_OK)
+async def list_experiments(
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+    cursor: str | None = None,
+    limit: int = 20,
+) -> Envelope[dict]:
+    """List persisted experiment plans, newest first.
+
+    Returns a paginated list of experiment plans filtered to genuine
+    persisted experiments via the ``EntityFingerprintRow``
+    discriminator (kind='experiment'). Each item carries the full plan
+    payload (reconstructed by the existing ``_attributes_to_plan``
+    helper, reused via ``get_experiment``).
+
+    This endpoint is read-only — it emits no audit event, mutates no
+    attributes, and never calls ``plan_experiment`` or
+    ``create_execution``.
+
+    Pagination:
+    - ``limit``: 1..100 (default 20).
+    - ``cursor``: opaque base64url token; the previous page's
+      ``meta.pagination.next_cursor`` value, or ``None`` for the first
+      page.
+    - ``next_cursor``: populated iff more results exist after this
+      page; ``None`` if this is the last page.
+    - Cursor malformed → 422 ``validation_error``; stale cursor
+      (referenced rows deleted) → empty page (200, ``items=[]``,
+      ``next_cursor=null``).
+
+    For full plan detail, use ``GET /api/v1/experiments/{experiment_id}``
+    (unchanged from G05-T05).
+    """
+    from synapse.api.v1._list_pagination import (
+        DEFAULT_LIMIT,
+        list_experiments_page,
+    )
+
+    effective_limit = limit if limit is not None else DEFAULT_LIMIT
+
+    page = await list_experiments_page(
+        session,
+        cursor=cursor,
+        limit=effective_limit,
+    )
+
+    # Reconstruct each plan via the existing read-only ``get_experiment``
+    # helper. This avoids duplicating the JSON-parsing logic and
+    # guarantees the list payload matches the by-ID payload shape.
+    items = []
+    for row in page.items:
+        plan = await get_experiment(session, row.id)
+        if plan is None:
+            # Should not happen — the fingerprint discriminator ensures
+            # the row exists and is kind='experiment'. Defensive: skip.
+            continue
+        items.append(plan)
+
+    return Envelope.success(
+        data={
+            "items": items,
+            "count": len(items),
+        },
+        request_id=request_id,
+        pagination=page.pagination,
+    )

@@ -8,6 +8,13 @@ Endpoints:
 The ``POST /api/v1/experiments/{experiment_id}/execute`` endpoint is
 registered in ``experiments.py`` (it lives on the experiments router).
 
+G07-PRE-02 (read-only amendments): a new ``GET /api/v1/executions`` list
+endpoint was added. It is read-only (no audit event, no mutation) and
+paginated via the new ``_list_pagination`` module. Optional
+``experiment_id`` filter is supported via a substring match on the
+execution's persisted ``attributes`` JSON column (portable across
+SQLite and PostgreSQL).
+
 Follows existing FastAPI conventions: auth, standard envelope, validation
 errors, OpenAPI compatibility.
 """
@@ -168,3 +175,90 @@ async def get_execution_endpoint(
         raise NotFoundError(f"execution {execution_id!r} not found")
 
     return Envelope.success(data=result, request_id=request_id)
+
+
+# ── G07-PRE-02 — read-only list (paginated, optional experiment_id) ────────
+#
+# This GET was added by the G07-PRE-02 mission. It is read-only (no
+# audit event, no mutation) and paginated via the new
+# ``_list_pagination`` module. Route ordering is safe: FastAPI matches
+# by HTTP method, and the empty-string path "" only matches the exact
+# prefix ``/api/v1/executions`` (not ``/api/v1/executions/{id}``).
+
+
+@router.get("", status_code=status.HTTP_200_OK)
+async def list_executions(
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+    experiment_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = 20,
+) -> Envelope[dict]:
+    """List persisted execution records, newest first.
+
+    Optional ``experiment_id`` filter: returns only executions whose
+    ``attributes.experiment_id`` matches. The filter is implemented as
+    a portable SQL ``LIKE`` substring match on the JSON ``attributes``
+    column (``LIKE '%"experiment_id": "{experiment_id}"%'``). The
+    pattern has leading and trailing ``%`` wildcards but no inner
+    ``%`` wildcards — SQL ``LIKE`` is anchored, so inner ``%`` would
+    greedily consume characters needed for the literal tail of the
+    pattern.
+    Limitation: in the unlikely case where another field in the
+    execution's attributes JSON happens to contain the experiment_id
+    string in that exact pattern, it would match. The current codebase
+    stores ``experiment_id`` only as a top-level attribute, so the
+    filter is precise in practice.
+
+    Returns a paginated list of execution records filtered to genuine
+    persisted executions via the ``EntityFingerprintRow`` discriminator
+    (kind='execution'). Each item carries the full execution payload
+    (reconstructed by the existing ``_attributes_to_execution`` helper,
+    reused via ``get_execution``).
+
+    This endpoint is read-only — it emits no audit event, mutates no
+    attributes, and never calls ``create_execution``,
+    ``record_observation``, or ``finalize_execution``.
+
+    Pagination:
+    - ``limit``: 1..100 (default 20).
+    - ``cursor``: opaque base64url token; the previous page's
+      ``meta.pagination.next_cursor`` value, or ``None`` for the first
+      page.
+    - ``next_cursor``: populated iff more results exist after this
+      page; ``None`` if this is the last page.
+    - Cursor malformed → 422 ``validation_error``; stale cursor →
+      empty page (200, ``items=[]``, ``next_cursor=null``).
+    """
+    from synapse.api.v1._list_pagination import (
+        DEFAULT_LIMIT,
+        list_executions_page,
+    )
+
+    effective_limit = limit if limit is not None else DEFAULT_LIMIT
+
+    page = await list_executions_page(
+        session,
+        cursor=cursor,
+        limit=effective_limit,
+        experiment_id=experiment_id,
+    )
+
+    # Reconstruct each execution via the existing read-only
+    # ``get_execution`` helper.
+    items = []
+    for row in page.items:
+        execution = await get_execution(session, row.id)
+        if execution is None:
+            continue
+        items.append(execution)
+
+    return Envelope.success(
+        data={
+            "items": items,
+            "count": len(items),
+        },
+        request_id=request_id,
+        pagination=page.pagination,
+    )

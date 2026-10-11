@@ -3,11 +3,18 @@
 Activates the future-intelligence endpoints:
   - POST   /api/v1/future/signals                              (G06-T01)
   - POST   /api/v1/future/scenarios                            (G06-T02)
+  - GET    /api/v1/future/scenarios                            (G07-PRE-02 list)
   - GET    /api/v1/future/scenarios/{scenario_id}              (G06-T02)
   - POST   /api/v1/future/scenarios/{scenario_id}/evaluate             (G06-T03)
   - POST   /api/v1/future/scenarios/{scenario_id}/prototype-plan       (G06-T03)
   - POST   /api/v1/future/scenarios/{scenario_id}/reassess             (G06-T04)
   - GET    /api/v1/future/scenarios/{scenario_id}/revisions            (G06-T04)
+
+The G07-PRE-02 ``GET /api/v1/future/scenarios`` list endpoint is
+read-only (no audit event, no mutation) and paginated via the new
+``_list_pagination`` module. Route ordering is safe: FastAPI matches
+by HTTP method, and the path "/scenarios" only matches the exact
+collection path (not "/scenarios/{scenario_id}").
 
 Per the approved G06 plan (section 9):
 
@@ -474,4 +481,81 @@ async def list_revisions_endpoint(
     return Envelope.success(
         data=revisions,
         request_id=request_id,
+    )
+
+
+# ── G07-PRE-02 — read-only scenarios list (paginated) ─────────────────────
+#
+# This GET was added by the G07-PRE-02 mission. It is read-only (no
+# audit event, no mutation) and paginated via the new
+# ``_list_pagination`` module. Route ordering is safe: FastAPI matches
+# by HTTP method, and the path "/scenarios" (no path param) only
+# matches the exact collection path ``/api/v1/future/scenarios`` (not
+# ``/api/v1/future/scenarios/{scenario_id}``).
+
+
+@router.get("/scenarios", status_code=status.HTTP_200_OK)
+async def list_scenarios(
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+    cursor: str | None = None,
+    limit: int = 20,
+) -> Envelope[dict]:
+    """List persisted scenarios, newest first.
+
+    Returns a paginated list of scenarios filtered to genuine persisted
+    scenarios via the ``EntityFingerprintRow`` discriminator
+    (kind='scenario'). Each item carries the full scenario payload
+    (reconstructed by the existing ``get_scenario`` helper, which is
+    read-only and unchanged from G06-T02).
+
+    This endpoint is read-only — it emits no audit event, mutates no
+    attributes, and never calls ``build_scenario``,
+    ``evaluate_scenario``, ``plan_prototype``, ``reassess_scenario``,
+    or ``persist_evaluation_snapshot``.
+
+    Pagination:
+    - ``limit``: 1..100 (default 20).
+    - ``cursor``: opaque base64url token; the previous page's
+      ``meta.pagination.next_cursor`` value, or ``None`` for the first
+      page.
+    - ``next_cursor``: populated iff more results exist after this
+      page; ``None`` if this is the last page.
+    - Cursor malformed → 422 ``validation_error``; stale cursor →
+      empty page (200, ``items=[]``, ``next_cursor=null``).
+
+    For full scenario detail, use
+    ``GET /api/v1/future/scenarios/{scenario_id}`` (unchanged from
+    G06-T02).
+    """
+    from synapse.api.v1._list_pagination import (
+        DEFAULT_LIMIT,
+        list_scenarios_page,
+    )
+
+    effective_limit = limit if limit is not None else DEFAULT_LIMIT
+
+    page = await list_scenarios_page(
+        session,
+        cursor=cursor,
+        limit=effective_limit,
+    )
+
+    # Reconstruct each scenario via the existing read-only
+    # ``get_scenario`` helper.
+    items = []
+    for row in page.items:
+        scenario = await get_scenario(session, row.id)
+        if scenario is None:
+            continue
+        items.append(scenario)
+
+    return Envelope.success(
+        data={
+            "items": items,
+            "count": len(items),
+        },
+        request_id=request_id,
+        pagination=page.pagination,
     )

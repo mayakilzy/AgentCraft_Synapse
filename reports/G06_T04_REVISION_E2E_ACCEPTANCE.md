@@ -3,7 +3,7 @@
 **Status**: PASS
 **Task**: G06-T04 — Scenario Revision + E2E Acceptance (final task of G06)
 **Starting SHA**: `1f13c2005db232818f04e3426129dbb166557c79`
-**Final SHA**: populated after commit
+**Final SHA**: `2e0cbe8aac8965cdf5c34241278f0a7231a13be5`
 **Date**: 2026-10-11
 **Developer**: GLM
 **Reviewer**: ChatGPT (pending)
@@ -651,7 +651,7 @@ MODIFIED_FILES =
 REMAINING_BLOCKERS = None for G06. Pre-existing production blockers
   (per ADR-0011) remain separate and out of G06-T04 scope.
 
-FINAL_SHA = (populated after commit)
+FINAL_SHA = 2e0cbe8aac8965cdf5c34241278f0a7231a13be5
 
 READY_FOR_G06_FINAL_REVIEW = YES
 ```

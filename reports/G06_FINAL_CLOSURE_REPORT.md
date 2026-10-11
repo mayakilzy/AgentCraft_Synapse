@@ -411,7 +411,7 @@ MODIFIED_FILES_IN_G06 =
   G06-T03: src/synapse/application/scenario_evaluator.py, src/synapse/application/prototype_planner.py, src/synapse/api/v1/future.py, tests/integration/test_g06_t03_evaluation_prototype.py
   G06-T04: src/synapse/application/scenario_revision.py (NEW), src/synapse/api/v1/future.py (MODIFIED), tests/integration/test_g06_t04_revision_e2e.py (NEW)
 
-FINAL_G06_SHA = (populated after final commit)
+FINAL_G06_SHA = 2e0cbe8aac8965cdf5c34241278f0a7231a13be5
 
 READY_FOR_G06_FINAL_REVIEW = YES
 ```

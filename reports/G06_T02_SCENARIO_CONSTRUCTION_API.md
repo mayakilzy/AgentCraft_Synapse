@@ -379,7 +379,7 @@ RUFF = PASS
 OPENAPI = PASS
 MODIFIED_FILES = src/synapse/application/scenario_builder.py (NEW), src/synapse/api/v1/future.py (NEW), src/synapse/api/v1/router.py (modified), tests/integration/test_g06_t02_scenario_construction.py (NEW), tests/unit/api/test_system.py (modified), tests/integration/test_g04_t05_external_client.py (modified)
 REMAINING_LIMITATIONS = prototype-plan deferred to G06-T03 (501); scenario evaluation deferred to G06-T03; scenario revision deferred to G06-T04; _find_scenario_by_run_id is linear scan (no index); F4 with no derived deps populates from capability IDs
-FINAL_SHA = <populated after commit>
+FINAL_SHA = 435134364397f44d97eff2ec17f607e604f0e247
 READY_FOR_G06_T03_REVIEW = YES
 ```
 

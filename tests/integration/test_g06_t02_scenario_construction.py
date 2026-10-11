@@ -927,9 +927,9 @@ async def test_add_07_no_unsupported_predicates(app, db_session):
 
 
 @pytest.mark.asyncio
-async def test_add_08_prototype_plan_remains_501(app, client, db_session, auth_headers_reader):
-    """The prototype-plan endpoint must remain 501 (deferred to G06-T03),
-    not pretend to be complete."""
+async def test_add_08_prototype_plan_is_functional(app, client, db_session, auth_headers_reader):
+    """G06-T03 activated the prototype-plan endpoint. It now returns 200
+    (Mode B proposal for scenarios without a linked innovation), NOT 501."""
     fixture = await _seed_f0_kb(db_session)
     await db_session.commit()
 
@@ -944,14 +944,17 @@ async def test_add_08_prototype_plan_remains_501(app, client, db_session, auth_h
     )
     assert create_r.status_code == 200
     scenario_id = create_r.json()["data"]["scenario_id"]
+    await db_session.commit()
 
-    # prototype-plan must return 501
+    # prototype-plan now returns 200 (Mode B proposal — no linked innovation)
     r = client.post(
         f"/api/v1/future/scenarios/{scenario_id}/prototype-plan",
         headers=auth_headers_reader,
         json={},
     )
-    assert r.status_code == 501
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["mode"] == "prototype_proposal"
 
 
 # == API: GET scenario ====================================================

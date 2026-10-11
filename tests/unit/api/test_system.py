@@ -58,10 +58,9 @@ def test_future_routes_return_501(client, auth_headers_reader):
     The G05-T05 slice implemented the /experiments POST + GET routes.
     The G06-T02 slice implemented the /future/scenarios POST + GET routes
     and the /future/signals POST route.
-    These are excluded from the 501 list.
-
-    The only remaining 501 is /future/scenarios/{id}/prototype-plan
-    (deferred to G06-T03).
+    The G06-T03 slice implemented the /future/scenarios/{id}/evaluate and
+    /future/scenarios/{id}/prototype-plan routes.
+    All future routes are now functional — no 501s remain.
     """
     paths = [
         # POST /api/v1/reasoning/queries was implemented in G04-T03.
@@ -70,7 +69,9 @@ def test_future_routes_return_501(client, auth_headers_reader):
         # implemented in G05-T05.
         # POST /api/v1/future/scenarios + GET /api/v1/future/scenarios/{id}
         # + POST /api/v1/future/signals were implemented in G06-T01+T02.
-        # The only remaining 501 is the prototype-plan route (G06-T03 scope).
+        # POST /api/v1/future/scenarios/{id}/evaluate + prototype-plan
+        # were implemented in G06-T03.
+        # All future routes are now functional — no 501s remain.
     ]
     for method, path in paths:
         r = client.request(method, path, headers=auth_headers_reader)

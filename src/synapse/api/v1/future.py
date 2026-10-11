@@ -1,22 +1,20 @@
-"""G06-T02 — Future Intelligence API.
+"""G06-T02 + G06-T03 — Future Intelligence API.
 
-Activates the three existing 501 placeholders for future scenarios:
-  - POST   /api/v1/future/scenarios
-  - GET    /api/v1/future/scenarios/{scenario_id}
-  - POST   /api/v1/future/scenarios/{scenario_id}/prototype-plan
-
-Also exposes the G06-T01 signal service:
-  - POST   /api/v1/future/signals
+Activates the future-intelligence endpoints:
+  - POST   /api/v1/future/signals                     (G06-T01)
+  - POST   /api/v1/future/scenarios                   (G06-T02)
+  - GET    /api/v1/future/scenarios/{scenario_id}     (G06-T02)
+  - POST   /api/v1/future/scenarios/{scenario_id}/evaluate       (G06-T03)
+  - POST   /api/v1/future/scenarios/{scenario_id}/prototype-plan (G06-T03)
 
 Per the approved G06 plan (section 9):
 
-- Scenario creation and retrieval endpoints become functional in T02.
-- The future-signal endpoint exposes the completed G06-T01 service
-  without duplicating its logic.
-- The prototype-plan endpoint is **deferred to G06-T03**. It retains
-  an explicit, documented not-yet-implemented response (501) rather
-  than pretending it is complete. The route remains registered for
-  contract compatibility.
+- Scenario creation and retrieval endpoints are functional (T02).
+- The future-signal endpoint exposes the G06-T01 service (T02).
+- The evaluate endpoint is functional (T03).
+- The prototype-plan endpoint is functional (T03) with two-mode design:
+  Mode A (linked innovation) delegates to plan_experiment(); Mode B
+  (no linked innovation) returns a proposal.
 """
 
 from __future__ import annotations
@@ -25,10 +23,12 @@ from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
 from synapse.api.deps import DbSessionDep, PrincipalDep, RequestIDDep
-from synapse.api.errors import NotFoundError, UnsupportedFeatureError, ValidationError
+from synapse.api.errors import NotFoundError, ValidationError
 from synapse.api.responses import Envelope
 from synapse.application.future_signal import identify_future_signals
+from synapse.application.prototype_planner import plan_prototype
 from synapse.application.scenario_builder import build_scenario, get_scenario
+from synapse.application.scenario_evaluator import evaluate_scenario
 
 router = APIRouter(prefix="/future", tags=["future"])
 
@@ -220,40 +220,121 @@ async def retrieve_scenario(
     )
 
 
-# ── POST /api/v1/future/scenarios/{scenario_id}/prototype-plan ─────────────
-#
-# This endpoint is DEFERRED to G06-T03. It retains an explicit,
-# documented not-yet-implemented response (501) rather than pretending
-# it is complete. The route remains registered for contract compatibility.
-#
-# Per the G06 plan section 9.3 and the T02 mission section 6:
-# "If prototype planning is deferred to G06-T03, retain an explicit,
-# documented not-yet-implemented response rather than pretending it is
-# complete."
+# ── POST /api/v1/future/scenarios/{scenario_id}/evaluate ──────────────────
 
 
-@router.post(
-    "/scenarios/{scenario_id}/prototype-plan",
-    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-)
-async def prototype_plan(
+class EvaluateRequest(BaseModel):
+    """Request body for ``POST /api/v1/future/scenarios/{id}/evaluate``."""
+
+    pass  # No body fields — evaluation is deterministic from the scenario
+
+
+@router.post("/scenarios/{scenario_id}/evaluate", status_code=status.HTTP_200_OK)
+async def evaluate_scenario_endpoint(
     scenario_id: str,
+    body: EvaluateRequest,
     principal: PrincipalDep,
     session: DbSessionDep,
     request_id: RequestIDDep,
-) -> None:
-    """Prototype-plan endpoint — deferred to G06-T03.
+) -> Envelope[dict]:
+    """Evaluate a persisted scenario deterministically.
 
-    This endpoint will be implemented in G06-T03 (Scenario Evaluation +
-    Prototype Plan). It will delegate to ``plan_experiment()`` only in
-    Mode A (linked innovation + hypothesis) with caller-supplied
-    metrics; in Mode B (no linked innovation) it will return a proposal.
+    Returns a structured evaluation with evidence coverage, source
+    provenance, dependency readiness, contradiction exposure, assumption
+    assessment, horizon alignment, and an overall categorical result.
 
-    For now, it returns 501 Not Implemented to preserve contract
-    compatibility without prematurely implementing T03 logic.
+    The evaluation is read-only — it does NOT modify the scenario.
     """
-    raise UnsupportedFeatureError(
-        "POST /future/scenarios/{id}/prototype-plan is not implemented in "
-        "G06-T02. It will land in G06-T03 (Scenario Evaluation + Prototype "
-        "Plan)."
+    result = await evaluate_scenario(
+        session,
+        scenario_id,
+        requester=str(principal),
+    )
+    if result is None:
+        raise NotFoundError(f"scenario {scenario_id!r} not found")
+    return Envelope.success(
+        data=result,
+        request_id=request_id,
+    )
+
+
+# ── POST /api/v1/future/scenarios/{scenario_id}/prototype-plan ─────────────
+
+
+class PrototypePlanRequest(BaseModel):
+    """Request body for ``POST /api/v1/future/scenarios/{id}/prototype-plan``."""
+
+    protocol_override: str | None = Field(
+        default=None,
+        description="Optional protocol override. If omitted, the scenario's prototype_plan is used.",
+    )
+    metrics: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Caller-supplied metric schema ({name: dtype}). "
+            "REQUIRED for Mode A (linked innovation). Ignored in Mode B."
+        ),
+    )
+    baseline: str | None = Field(default=None, description="Optional baseline (Mode A only).")
+    execution_mode: str | None = Field(
+        default=None, description="Optional execution mode (Mode A only)."
+    )
+    safety_limits: dict[str, str | None] | None = Field(
+        default=None, description="Optional safety limits (Mode A only)."
+    )
+    cost_limits: dict[str, str | None] | None = Field(
+        default=None, description="Optional cost limits (Mode A only)."
+    )
+    run_id: str | None = Field(
+        default=None, description="Optional retry identity for idempotent creation."
+    )
+
+
+@router.post("/scenarios/{scenario_id}/prototype-plan", status_code=status.HTTP_200_OK)
+async def prototype_plan_endpoint(
+    scenario_id: str,
+    body: PrototypePlanRequest,
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+) -> Envelope[dict]:
+    """Plan a prototype for a persisted scenario (two-mode design).
+
+    **Mode A — Linked Innovation**: if the scenario has a
+    ``linked_innovation_concept_id`` that resolves to a persisted G05
+    innovation concept with a hypothesis, delegate to
+    ``plan_experiment()`` with caller-supplied metrics.
+
+    **Mode B — No Linked Innovation**: return a structured prototype
+    proposal. Do NOT call ``plan_experiment()``. Do NOT create an
+    Experiment entity.
+
+    Quality gates:
+    - F4 scenarios require a critique (frozen validator).
+    - Mode A requires caller-supplied metrics — never fabricated.
+    - Mode A never bypasses hypothesis resolution.
+    - No new relationship predicates.
+    - G05 experiment-planning behavior is unchanged.
+    """
+    try:
+        result = await plan_prototype(
+            session,
+            scenario_id,
+            protocol_override=body.protocol_override,
+            metrics=body.metrics,
+            baseline=body.baseline,
+            execution_mode=body.execution_mode,
+            safety_limits=body.safety_limits,
+            cost_limits=body.cost_limits,
+            run_id=body.run_id,
+            requester=str(principal),
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    if result is None:
+        raise NotFoundError(f"scenario {scenario_id!r} not found")
+    return Envelope.success(
+        data=result,
+        request_id=request_id,
     )

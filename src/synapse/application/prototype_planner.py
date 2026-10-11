@@ -52,6 +52,7 @@ async def plan_prototype(
     execution_mode: str | None = None,
     safety_limits: dict[str, Any] | None = None,
     cost_limits: dict[str, Any] | None = None,
+    hypothesis_id: str | None = None,
     run_id: str | None = None,
     requester: str | None = None,
 ) -> dict[str, Any] | None:
@@ -75,6 +76,10 @@ async def plan_prototype(
         execution_mode: optional execution mode (Mode A only).
         safety_limits: optional safety limits (Mode A only).
         cost_limits: optional cost limits (Mode A only).
+        hypothesis_id: optional explicit hypothesis selection for Mode A.
+            If provided, must belong to the linked innovation concept.
+            If omitted and exactly one hypothesis exists, auto-selected.
+            If omitted and multiple hypotheses exist, raises ValueError.
         run_id: optional retry identity for idempotent creation.
         requester: optional actor name for audit logging.
 
@@ -83,8 +88,10 @@ async def plan_prototype(
 
     Raises:
         ValueError: if the scenario is F4 without critique, if Mode A is
-            requested but metrics are missing, or if the linked innovation
-            or hypothesis does not resolve.
+            requested but metrics are missing, if the linked innovation
+            or hypothesis does not resolve, if multiple hypotheses exist
+            and none is explicitly selected, or if the selected hypothesis
+            belongs to a different innovation.
     """
     scenario = await get_scenario(session, scenario_id)
     if scenario is None:
@@ -101,21 +108,34 @@ async def plan_prototype(
 
     # ── Try Mode A: linked innovation ──────────────────────────────────
     if linked_concept_id:
-        hypothesis_id = await _find_hypothesis_for_concept(session, linked_concept_id)
-        if hypothesis_id is not None:
-            return await _mode_a_linked_experiment(
-                session,
-                scenario=scenario,
-                hypothesis_id=hypothesis_id,
-                protocol_override=protocol_override,
-                metrics=metrics,
-                baseline=baseline,
-                execution_mode=execution_mode,
-                safety_limits=safety_limits,
-                cost_limits=cost_limits,
-                run_id=run_id,
-                requester=requester,
+        # Verify the concept entity exists and is kind="project"
+        concept_entity = await _load_concept_entity(session, linked_concept_id)
+        if concept_entity is not None:
+            # Find eligible hypotheses for this concept
+            eligible_hypotheses = await _find_eligible_hypotheses(
+                session, linked_concept_id
             )
+
+            if eligible_hypotheses:
+                # Determine which hypothesis to use
+                selected_hypothesis_id = _select_hypothesis(
+                    eligible_hypotheses, hypothesis_id, linked_concept_id
+                )
+
+                if selected_hypothesis_id is not None:
+                    return await _mode_a_linked_experiment(
+                        session,
+                        scenario=scenario,
+                        hypothesis_id=selected_hypothesis_id,
+                        protocol_override=protocol_override,
+                        metrics=metrics,
+                        baseline=baseline,
+                        execution_mode=execution_mode,
+                        safety_limits=safety_limits,
+                        cost_limits=cost_limits,
+                        run_id=run_id,
+                        requester=requester,
+                    )
 
     # ── Mode B: no linked innovation (or no hypothesis) ────────────────
     return await _mode_b_proposal(
@@ -285,27 +305,80 @@ async def _mode_b_proposal(
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-async def _find_hypothesis_for_concept(
+async def _load_concept_entity(
     session: AsyncSession,
     concept_id: str,
-) -> str | None:
-    """Find a hypothesis (ClaimRow) linked to a G05 innovation concept.
-
-    The hypothesis must have ``subject_ref = concept_id`` and
-    ``epistemic_state = 'hypothesized'`` (or any non-terminal state).
-    """
-    stmt = select(ClaimRow).where(
-        ClaimRow.subject_ref == concept_id,
-    ).order_by(ClaimRow.created_at.desc()).limit(1)
-    claim = (await session.execute(stmt)).scalar_one_or_none()
-    if claim is None:
-        return None
-    # Verify the concept entity exists and is kind="project"
-    ent_stmt = select(EntityRow).where(
+) -> EntityRow | None:
+    """Load a G05 innovation concept entity and verify it is kind='project'."""
+    stmt = select(EntityRow).where(
         EntityRow.id == concept_id,
         EntityRow.kind == "project",
     )
-    entity = (await session.execute(ent_stmt)).scalar_one_or_none()
-    if entity is None:
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _find_eligible_hypotheses(
+    session: AsyncSession,
+    concept_id: str,
+) -> list[ClaimRow]:
+    """Find ALL eligible hypotheses linked to a G05 innovation concept.
+
+    A hypothesis is a ClaimRow with ``subject_ref = concept_id``.
+    Returns ALL matching claims (not just the most recent), so the
+    caller can handle the single-vs-multiple selection explicitly
+    (Correction B).
+    """
+    stmt = select(ClaimRow).where(
+        ClaimRow.subject_ref == concept_id,
+    ).order_by(ClaimRow.created_at.asc())
+    return list((await session.execute(stmt)).scalars().all())
+
+
+def _select_hypothesis(
+    eligible: list[ClaimRow],
+    caller_hypothesis_id: str | None,
+    concept_id: str,
+) -> str | None:
+    """Select the hypothesis to use for Mode A.
+
+    Per Correction B (G06-T03A):
+
+    1. If the caller supplied ``hypothesis_id``, verify it belongs to
+       the linked innovation concept. If it belongs to another concept →
+       ValueError. If it does not exist among the eligible hypotheses →
+       ValueError.
+    2. If the caller did not supply ``hypothesis_id`` and exactly one
+       eligible hypothesis exists → auto-select it.
+    3. If the caller did not supply ``hypothesis_id`` and multiple
+       eligible hypotheses exist → ValueError (actionable: the caller
+       must specify which hypothesis to use).
+    4. If no eligible hypotheses exist → return None (Mode B).
+    """
+    if not eligible:
         return None
-    return claim.id
+
+    # Case 1: caller supplied hypothesis_id
+    if caller_hypothesis_id:
+        eligible_ids = {c.id for c in eligible}
+        if caller_hypothesis_id not in eligible_ids:
+            # Check if it belongs to a DIFFERENT concept
+            # (the caller may have passed a hypothesis from another innovation)
+            raise ValueError(
+                f"hypothesis_id={caller_hypothesis_id!r} does not belong to "
+                f"the linked innovation concept {concept_id!r}. Eligible "
+                f"hypothesis IDs: {sorted(eligible_ids)}. Use one of these, "
+                f"or verify the hypothesis belongs to this innovation."
+            )
+        return caller_hypothesis_id
+
+    # Case 2: exactly one eligible hypothesis → auto-select
+    if len(eligible) == 1:
+        return eligible[0].id
+
+    # Case 3: multiple eligible hypotheses and no explicit selection
+    eligible_ids = sorted(c.id for c in eligible)
+    raise ValueError(
+        f"Multiple eligible hypotheses exist for innovation concept "
+        f"{concept_id!r}: {eligible_ids}. Explicitly select one by "
+        f"providing hypothesis_id in the request."
+    )

@@ -109,7 +109,7 @@ async def evaluate_scenario(
     # ── E. Assumption assessment ───────────────────────────────────────
     assumptions = scenario.get("assumptions", [])
     assumption_assessment = await _assess_assumptions(
-        session, assumptions, fragments
+        session, assumptions, fragments, scenario
     )
 
     # ── F. Horizon alignment ───────────────────────────────────────────
@@ -495,64 +495,110 @@ async def _assess_assumptions(
     session: AsyncSession,
     assumptions: list[str],
     fragments: list[EvidenceFragmentRow],
+    scenario: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Assess each assumption.
+    """Assess each assumption with explicit, defensible association.
 
-    For each assumption, classify as:
-    - "supported": a persisted claim with a positive verification outcome
-      directly addresses the assumption.
-    - "contested": a persisted claim with a CONTESTED outcome addresses it.
-    - "not_evidenced": no claim addresses the assumption.
-    - "unknown": cannot determine (e.g., assessment unavailable).
+    Per Correction A (G06-T03A):
 
-    Natural-language similarity alone is NOT proof. We only map an
-    assumption to a claim if the claim's evidence_refs overlap with the
-    scenario's evidence_refs (defensible mapping to persisted evidence).
+    An assumption can only be classified as "supported" or "contested"
+    if there is an **explicit, defensible association** between the
+    assumption and a persisted claim. Natural-language similarity (e.g.,
+    substring matching of the assumption text against a claim's
+    proposition) is NOT sufficient. Shared evidence fragments alone are
+    NOT sufficient.
+
+    The only existing structured association available without modifying
+    the frozen Scenario contract is the scenario's ``risks`` dict, which
+    may contain an ``assumption_associations`` key mapping assumption
+    strings to claim IDs:
+
+    ``risks = {"assumption_associations": {"assumption text": "claim-id"}}``
+
+    If this key exists and maps an assumption to a real claim, the
+    claim's verification outcome determines the classification:
+    - Positive outcome (source_supported / corroborated / verified) → "supported"
+    - Contested outcome → "contested"
+    - Other outcome → "unknown"
+
+    If no explicit association exists for an assumption → "unknown"
+    with an explicit limitation note. Absence of support is NOT
+    contradiction.
     """
-    fragment_ids = {f.id for f in fragments}
     results: list[dict[str, Any]] = []
 
+    # Extract explicit assumption associations from the scenario's risks dict
+    risks = scenario.get("risks", {}) or {}
+    associations: dict[str, str] = {}
+    if isinstance(risks, dict):
+        raw = risks.get("assumption_associations", {})
+        if isinstance(raw, dict):
+            associations = {str(k): str(v) for k, v in raw.items()}
+
     for assumption in assumptions:
-        # Find claims whose evidence_refs overlap with the scenario's fragments
-        # and whose proposition mentions the assumption (substring match —
-        # this is a defensible heuristic, not natural-language similarity)
-        # We check if any of the scenario's fragments are cited by claims
-        # that have been assessed.
-        supported = False
-        contested = False
-        has_any_claim = False
+        claim_id = associations.get(assumption)
 
-        for frag_id in fragment_ids:
-            claim_stmt = select(ClaimRow).where(
-                ClaimRow.evidence_refs.contains(frag_id)
-            )
-            claims = list((await session.execute(claim_stmt)).scalars().all())
-            for claim in claims:
-                has_any_claim = True
-                assessment = await _get_latest_verification_assessment(session, claim.id)
-                if assessment is not None:
-                    outcome = assessment.get("outcome", "")
-                    if outcome in ("source_supported", "corroborated", "verified"):
-                        supported = True
-                    elif outcome == "contested":
-                        contested = True
+        if not claim_id:
+            # No explicit association → cannot defensibly classify
+            results.append({
+                "assumption": assumption,
+                "classification": "unknown",
+                "note": (
+                    "No explicit assumption-to-claim association found. "
+                    "Classification is 'unknown' because natural-language "
+                    "similarity alone is not proof. To enable supported/"
+                    "contested classification, add an "
+                    "'assumption_associations' entry in the scenario's "
+                    "risks dict mapping this assumption to a claim ID."
+                ),
+            })
+            continue
 
-        if contested:
-            classification = "contested"
-        elif supported:
+        # Verify the claim exists
+        claim_stmt = select(ClaimRow).where(ClaimRow.id == claim_id)
+        claim = (await session.execute(claim_stmt)).scalar_one_or_none()
+        if claim is None:
+            results.append({
+                "assumption": assumption,
+                "classification": "unknown",
+                "associated_claim_id": claim_id,
+                "note": (
+                    f"Explicit association to claim {claim_id!r} exists but "
+                    f"the claim does not resolve to a persisted ClaimRow."
+                ),
+            })
+            continue
+
+        # Check the claim's verification assessment
+        assessment = await _get_latest_verification_assessment(session, claim.id)
+        if assessment is None:
+            results.append({
+                "assumption": assumption,
+                "classification": "unknown",
+                "associated_claim_id": claim_id,
+                "note": (
+                    f"Explicitly associated to claim {claim_id!r}, but no "
+                    f"verification assessment is available."
+                ),
+            })
+            continue
+
+        outcome = assessment.get("outcome", "")
+        if outcome in ("source_supported", "corroborated", "verified"):
             classification = "supported"
-        elif has_any_claim:
-            classification = "unknown"
+        elif outcome == "contested":
+            classification = "contested"
         else:
-            classification = "not_evidenced"
+            classification = "unknown"
 
         results.append({
             "assumption": assumption,
             "classification": classification,
+            "associated_claim_id": claim_id,
+            "claim_outcome": outcome,
             "note": (
-                "Classification is based on the verification outcome of "
-                "claims citing the scenario's evidence fragments. "
-                "Natural-language similarity alone is not proof."
+                f"Classification based on explicit association to claim "
+                f"{claim_id!r} with verification outcome '{outcome}'."
             ),
         })
 
@@ -731,10 +777,19 @@ async def _load_fragments(
     return list((await session.execute(stmt)).scalars().all())
 
 
-def _safe_json_loads(raw: str | None) -> Any:
-    if not raw:
+def _safe_json_loads(raw: Any) -> Any:
+    """Safely parse a JSON string, or return the value if already parsed.
+
+    SQLAlchemy may auto-deserialize Text columns containing JSON into
+    dicts/lists. This helper handles both cases.
+    """
+    if raw is None:
         return {}
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+    if isinstance(raw, dict | list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}

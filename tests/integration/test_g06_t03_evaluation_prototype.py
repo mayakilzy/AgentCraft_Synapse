@@ -1124,3 +1124,455 @@ async def test_prototype_proposed_audit_event_emitted(app, db_session):
         )
     )).scalar()
     assert after == before + 1
+
+
+# =========================================================================
+# G06-T03A Correction A: Assumption evidence integrity tests
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_corr_a_no_explicit_association_returns_unknown(app, db_session):
+    """An assumption with no explicit association to a claim must be
+    classified as 'unknown', NOT 'supported' or 'contested'."""
+    fixture = await _seed_evaluated_kb(db_session)
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["an assumption with no association"],
+        evidence_refs=[fixture["fragment_id"]],
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        assert a["classification"] == "unknown"
+        assert "No explicit assumption-to-claim association" in a["note"]
+
+
+@pytest.mark.asyncio
+async def test_corr_a_similar_text_not_supported(app, db_session):
+    """Similar text in a claim proposition does NOT classify the
+    assumption as 'supported' — an explicit association is required."""
+    fixture = await _seed_evaluated_kb(db_session)
+    # The claim proposition contains "tool-A-t03 provides capability-A-t03"
+    # The assumption text is similar but there is NO explicit association
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["tool-A-t03 provides capability-A-t03"],  # similar to claim text
+        evidence_refs=[fixture["fragment_id"]],
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        # Must NOT be 'supported' — no explicit association
+        assert a["classification"] != "supported"
+        assert a["classification"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_corr_a_shared_evidence_not_supported(app, db_session):
+    """Shared evidence fragment between scenario and claim does NOT
+    classify the assumption as 'supported' — an explicit association
+    is required."""
+    fixture = await _seed_evaluated_kb(db_session)
+    # The scenario shares frag-t03-a with the claims, but the assumption
+    # is unrelated to those claims. No explicit association exists.
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["a completely unrelated assumption"],
+        evidence_refs=[fixture["fragment_id"]],
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        assert a["classification"] != "supported"
+        assert a["classification"] != "contested"
+
+
+@pytest.mark.asyncio
+async def test_corr_a_genuine_association_with_verified_evidence(app, db_session):
+    """When an explicit assumption-to-claim association exists AND the
+    claim has a positive verification outcome, the assumption is
+    classified as 'supported'."""
+    fixture = await _seed_evaluated_kb(db_session)
+    # Build a scenario with an explicit assumption association
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is supported"],
+        evidence_refs=[fixture["fragment_id"]],
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    # Manually add the assumption association to the scenario's risks dict
+    from sqlalchemy import select as sel
+    entity = (await db_session.execute(
+        sel(EntityRow).where(EntityRow.id == scenario["scenario_id"], EntityRow.kind == "scenario")
+    )).scalar_one()
+    import json as _json
+    attrs = _json.loads(entity.attributes)
+    attrs["risks"] = {
+        "assumption_associations": {
+            "the integration is supported": "claim-t03-A"  # verified claim
+        }
+    }
+    entity.attributes = _json.dumps(attrs, default=str)
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        if a["assumption"] == "the integration is supported":
+            assert a["classification"] == "supported"
+            assert a.get("associated_claim_id") == "claim-t03-A"
+
+
+@pytest.mark.asyncio
+async def test_corr_a_genuine_association_with_contradiction(app, db_session):
+    """When an explicit association exists AND the claim has a contested
+    verification outcome, the assumption is classified as 'contested'."""
+    # Seed a contested claim
+    src_sup = await _make_source(db_session, "src-t03a-sup", "https://example.com/t03a-sup")
+    src_con = await _make_source(db_session, "src-t03a-con", "https://example.com/t03a-con")
+    frag_sup = await _make_fragment(db_session, "frag-t03a-sup", src_sup, "supports the claim.")
+    frag_con = await _make_fragment(db_session, "frag-t03a-con", src_con, "contradicts the claim.")
+    await _make_entity(db_session, "ent-t03a-x", "technology", "t03a-x")
+    cap = await _make_entity(db_session, "cap-t03a-x", "capability", "t03a-cap-x")
+    await _make_claim(
+        db_session, "claim-t03a-sup", "t03a-x provides t03a-cap-x.",
+        subject_ref="ent-t03a-x", object_ref="cap-t03a-x", evidence_refs=["frag-t03a-sup"],
+    )
+    await _make_claim(
+        db_session, "claim-t03a-con", "t03a-x fails to provide t03a-cap-x.",
+        subject_ref="ent-t03a-x", object_ref="cap-t03a-x", evidence_refs=["frag-t03a-con"],
+        contradicting_refs=["frag-t03a-sup"], epistemic_state="disputed",
+    )
+    r = await create_relationship(
+        db_session, from_entity_id="ent-t03a-x", to_entity_id="cap-t03a-x",
+        predicate="PROVIDES", evidence_refs=["frag-t03a-sup"], origin="explicit",
+    )
+    assert r["ok"]
+    await db_session.commit()
+    await assess_claim(db_session, "claim-t03a-sup", requester="t03a")
+    await assess_claim(db_session, "claim-t03a-con", requester="t03a")
+    await db_session.commit()
+
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=["cap-t03a-x"],
+        assumptions=["the integration works"],
+        evidence_refs=["frag-t03a-sup"],
+        missing_dependencies=["cap-t03a-x"],
+        horizon_class_override="F4",
+        critique="Speculative; contested evidence.",
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    # Add explicit association to the contested claim
+    from sqlalchemy import select as sel
+    entity = (await db_session.execute(
+        sel(EntityRow).where(EntityRow.id == scenario["scenario_id"], EntityRow.kind == "scenario")
+    )).scalar_one()
+    import json as _json
+    attrs = _json.loads(entity.attributes)
+    attrs["risks"] = {
+        "assumption_associations": {
+            "the integration works": "claim-t03a-con"  # contested claim (has contradicting_refs)
+        }
+    }
+    entity.attributes = _json.dumps(attrs, default=str)
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        if a["assumption"] == "the integration works":
+            assert a["classification"] == "contested"
+
+
+@pytest.mark.asyncio
+async def test_corr_a_absence_of_support_not_contradiction(app, db_session):
+    """An assumption with no explicit association is 'unknown', NOT
+    'contested'. Absence of support is NOT contradiction."""
+    fixture = await _seed_evaluated_kb(db_session)
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["unsupported assumption"],
+        evidence_refs=[fixture["fragment_id"]],
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    result = await evaluate_scenario(db_session, scenario["scenario_id"])
+    for a in result["assumption_assessment"]:
+        assert a["classification"] != "contested"
+        assert a["classification"] == "unknown"
+
+
+# =========================================================================
+# G06-T03A Correction B: Explicit hypothesis selection tests
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_corr_b_one_eligible_hypothesis_auto_selected(app, db_session):
+    """When exactly one eligible hypothesis exists, it is auto-selected."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+
+    result = await plan_prototype(
+        db_session,
+        scenario_id,
+        protocol_override="One hypothesis test.",
+        metrics={"precision": "float"},
+        requester="t03-tester",
+    )
+    assert result["mode"] == "linked_experiment"
+    assert result["hypothesis_id"] == linked["hypothesis_id"]
+
+
+@pytest.mark.asyncio
+async def test_corr_b_multiple_hypotheses_without_selection_fails(app, db_session):
+    """When multiple eligible hypotheses exist and none is explicitly
+    selected, raises ValueError."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+    concept_id = linked["concept_id"]
+
+    # Add a second hypothesis to the same concept
+
+    from synapse.storage.models import ClaimRow
+    second_hyp = ClaimRow(
+        id="hyp-t03a-second",
+        proposition="Second hypothesis for the same concept.",
+        subject_ref=concept_id,
+        evidence_refs="[]",
+        contradicting_refs="[]",
+        epistemic_state="hypothesized",
+        validity_conditions="[]",
+        extraction_method="test-fixture",
+        version=1,
+    )
+    db_session.add(second_hyp)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="Multiple eligible hypotheses"):
+        await plan_prototype(
+            db_session,
+            scenario_id,
+            protocol_override="Multiple hypotheses test.",
+            metrics={"precision": "float"},
+            # No hypothesis_id — should fail
+            requester="t03-tester",
+        )
+
+
+@pytest.mark.asyncio
+async def test_corr_b_multiple_hypotheses_with_explicit_selection(app, db_session):
+    """When multiple eligible hypotheses exist and the caller explicitly
+    selects one, it is used."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+    concept_id = linked["concept_id"]
+    first_hyp_id = linked["hypothesis_id"]
+
+    # Add a second hypothesis
+    second_hyp = ClaimRow(
+        id="hyp-t03a-second2",
+        proposition="Second hypothesis for explicit selection.",
+        subject_ref=concept_id,
+        evidence_refs="[]",
+        contradicting_refs="[]",
+        epistemic_state="hypothesized",
+        validity_conditions="[]",
+        extraction_method="test-fixture",
+        version=1,
+    )
+    db_session.add(second_hyp)
+    await db_session.commit()
+
+    # Explicitly select the first hypothesis
+    result = await plan_prototype(
+        db_session,
+        scenario_id,
+        protocol_override="Explicit selection test.",
+        metrics={"precision": "float"},
+        hypothesis_id=first_hyp_id,
+        requester="t03-tester",
+    )
+    assert result["mode"] == "linked_experiment"
+    assert result["hypothesis_id"] == first_hyp_id
+
+
+@pytest.mark.asyncio
+async def test_corr_b_cross_innovation_hypothesis_rejected(app, db_session):
+    """A hypothesis belonging to a different innovation is rejected."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+
+    # Generate a SECOND innovation to get a different hypothesis
+    gen2 = await generate_innovations(
+        db_session,
+        "different problem domain",
+        context="different context",
+    )
+    await db_session.commit()
+    other_hyp_id = gen2["concepts"][0]["hypothesis_id"]
+
+    with pytest.raises(ValueError, match="does not belong to the linked innovation concept"):
+        await plan_prototype(
+            db_session,
+            scenario_id,
+            protocol_override="Cross-innovation test.",
+            metrics={"precision": "float"},
+            hypothesis_id=other_hyp_id,
+            requester="t03-tester",
+        )
+
+
+@pytest.mark.asyncio
+async def test_corr_b_unknown_hypothesis_id_rejected(app, db_session):
+    """An unknown hypothesis_id is rejected."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+
+    with pytest.raises(ValueError, match="does not belong to the linked innovation concept"):
+        await plan_prototype(
+            db_session,
+            scenario_id,
+            protocol_override="Unknown hypothesis test.",
+            metrics={"precision": "float"},
+            hypothesis_id="hyp-does-not-exist",
+            requester="t03-tester",
+        )
+
+
+@pytest.mark.asyncio
+async def test_corr_b_mode_a_idempotent_retry(app, db_session):
+    """Mode A retry with the same run_id + same hypothesis reuses the
+    experiment (no duplicate)."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+
+    r1 = await plan_prototype(
+        db_session,
+        scenario_id,
+        protocol_override="Idempotent retry test.",
+        metrics={"precision": "float"},
+        hypothesis_id=linked["hypothesis_id"],
+        run_id="t03a-retry-001",
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    r2 = await plan_prototype(
+        db_session,
+        scenario_id,
+        protocol_override="Idempotent retry test.",
+        metrics={"precision": "float"},
+        hypothesis_id=linked["hypothesis_id"],
+        run_id="t03a-retry-001",
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    assert r1["experiment_id"] == r2["experiment_id"]
+
+
+@pytest.mark.asyncio
+async def test_corr_b_mode_b_unchanged(app, db_session):
+    """Mode B (no linked innovation) remains unchanged — returns proposal."""
+    fixture = await _seed_evaluated_kb(db_session)
+    scenario = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["mode B unchanged"],
+        evidence_refs=[fixture["fragment_id"]],
+        # No linked_innovation_concept_id
+        requester="t03-tester",
+    )
+    await db_session.commit()
+
+    result = await plan_prototype(
+        db_session,
+        scenario["scenario_id"],
+        requester="t03-tester",
+    )
+    assert result["mode"] == "prototype_proposal"
+    assert "experiment" not in result
+
+
+@pytest.mark.asyncio
+async def test_corr_b_api_hypothesis_id_in_request(app, client, db_session, auth_headers_reader):
+    """The API accepts hypothesis_id in the prototype-plan request body."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+    await db_session.commit()
+
+    r = client.post(
+        f"/api/v1/future/scenarios/{scenario_id}/prototype-plan",
+        headers=auth_headers_reader,
+        json={
+            "protocol_override": "API hypothesis selection test.",
+            "metrics": {"precision": "float"},
+            "hypothesis_id": linked["hypothesis_id"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["mode"] == "linked_experiment"
+    assert data["hypothesis_id"] == linked["hypothesis_id"]
+
+
+@pytest.mark.asyncio
+async def test_corr_b_api_multiple_hypotheses_422(app, client, db_session, auth_headers_reader):
+    """When multiple hypotheses exist and none is selected, the API
+    returns 422."""
+    linked = await _seed_linked_innovation(db_session)
+    scenario_id = linked["scenario"]["scenario_id"]
+    concept_id = linked["concept_id"]
+
+    # Add a second hypothesis
+    second_hyp = ClaimRow(
+        id="hyp-t03a-api-second",
+        proposition="Second hypothesis for API test.",
+        subject_ref=concept_id,
+        evidence_refs="[]",
+        contradicting_refs="[]",
+        epistemic_state="hypothesized",
+        validity_conditions="[]",
+        extraction_method="test-fixture",
+        version=1,
+    )
+    db_session.add(second_hyp)
+    await db_session.commit()
+
+    r = client.post(
+        f"/api/v1/future/scenarios/{scenario_id}/prototype-plan",
+        headers=auth_headers_reader,
+        json={
+            "protocol_override": "API multiple hypotheses test.",
+            "metrics": {"precision": "float"},
+            # No hypothesis_id — should return 422
+        },
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_corr_b_openapi_includes_hypothesis_id(app):
+    """OpenAPI schema includes hypothesis_id in PrototypePlanRequest."""
+    schema = app.openapi()
+    schemas = schema.get("components", {}).get("schemas", {})
+    pp_schema = schemas.get("PrototypePlanRequest", {})
+    properties = pp_schema.get("properties", {})
+    assert "hypothesis_id" in properties

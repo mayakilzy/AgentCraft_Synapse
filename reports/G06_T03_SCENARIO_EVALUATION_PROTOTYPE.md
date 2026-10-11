@@ -357,3 +357,114 @@ endpoint are implemented, tested, and verified. No production code
 outside the new/modified files was changed. All gates pass.
 
 **Do not begin G06-T04 without explicit reviewer authorization.**
+
+---
+
+## 15. G06-T03A — Assumption Evidence Integrity & Hypothesis Selection
+
+G06-T03 was functionally accepted subject to two focused integrity
+corrections (G06-T03A). Both are applied and verified below.
+
+### 15.1 Correction A — Assumption-to-evidence integrity
+
+**Root cause**: `_assess_assumptions()` classified assumptions as
+`supported` or `contested` based on shared evidence fragments between
+the scenario and claims — without verifying that the claim actually
+addresses the specific assumption. This was insufficient: shared
+evidence fragments alone do not establish a semantic association
+between an assumption and a claim.
+
+**Correction**: Rewrote `_assess_assumptions()` to require an
+**explicit, defensible association** between the assumption and a
+claim, stored in the scenario's `risks` dict under
+`assumption_associations`:
+```json
+{"assumption_associations": {"assumption text": "claim-id"}}
+```
+
+- If an explicit association exists and the claim has a positive
+  verification outcome → `supported`.
+- If an explicit association exists and the claim has a contested
+  outcome → `contested`.
+- If no explicit association exists → `unknown` (with an explicit
+  limitation note). Absence of support is NOT contradiction.
+- No substring matching. No shared-fragment-only inference. No LLM.
+
+Also fixed `_safe_json_loads()` to handle audit event payloads that
+SQLAlchemy auto-deserializes from JSON text to dicts.
+
+**Tests added** (6):
+- `test_corr_a_no_explicit_association_returns_unknown`
+- `test_corr_a_similar_text_not_supported`
+- `test_corr_a_shared_evidence_not_supported`
+- `test_corr_a_genuine_association_with_verified_evidence`
+- `test_corr_a_genuine_association_with_contradiction`
+- `test_corr_a_absence_of_support_not_contradiction`
+
+### 15.2 Correction B — Explicit hypothesis selection for Mode A
+
+**Root cause**: `_find_hypothesis_for_concept()` silently selected the
+most recently created hypothesis when multiple eligible hypotheses
+existed. This was non-deterministic from the caller's perspective.
+
+**Correction**: Replaced `_find_hypothesis_for_concept()` with three
+explicit helpers:
+- `_load_concept_entity()` — verifies the concept is `kind="project"`.
+- `_find_eligible_hypotheses()` — returns ALL eligible hypotheses (not
+  just the most recent).
+- `_select_hypothesis()` — implements the selection rules:
+  1. Caller supplies `hypothesis_id` → verify it belongs to the linked
+     concept; reject if it belongs to another innovation.
+  2. No `hypothesis_id` + exactly one hypothesis → auto-select.
+  3. No `hypothesis_id` + multiple hypotheses → `ValueError` (the
+     caller must specify which hypothesis to use).
+  4. No hypotheses → Mode B (proposal).
+
+Added `hypothesis_id` parameter to `plan_prototype()` and the API
+`PrototypePlanRequest` model.
+
+**Tests added** (10):
+- `test_corr_b_one_eligible_hypothesis_auto_selected`
+- `test_corr_b_multiple_hypotheses_without_selection_fails`
+- `test_corr_b_multiple_hypotheses_with_explicit_selection`
+- `test_corr_b_cross_innovation_hypothesis_rejected`
+- `test_corr_b_unknown_hypothesis_id_rejected`
+- `test_corr_b_mode_a_idempotent_retry`
+- `test_corr_b_mode_b_unchanged`
+- `test_corr_b_api_hypothesis_id_in_request`
+- `test_corr_b_api_multiple_hypotheses_422`
+- `test_corr_b_openapi_includes_hypothesis_id`
+
+### 15.3 G06-T03A validation results
+
+- **Focused tests**: 52 passed (36 original G06-T03 + 16 G06-T03A
+  correction tests) in 15.30s.
+- **G06-T01 regression**: 29 passed.
+- **G06-T02 regression**: 46 passed (1 flaky concurrent test on SQLite;
+  passes on re-run and on PostgreSQL).
+- **Full deterministic regression**: 736 passed, 34 skipped (PG),
+  3 deselected (live), 0 failed in 176.54s.
+- **Combined PostgreSQL suite**: 36 passed in 55.29s (34 PRB-03/G05-T06
+  + 2 G06-T03A Mode A on real PG).
+- **Ruff**: clean.
+- **OpenAPI**: OK.
+
+### 15.4 G06-T03A deliverable summary
+
+```
+G06_T03A_STATUS = PASS
+AUTHORITATIVE_START_SHA = adc186f9f20d3cd2deec472043e40f7742deafaa
+ASSUMPTION_EVIDENCE_INTEGRITY = PASS
+EXPLICIT_HYPOTHESIS_SELECTION = PASS
+CROSS_INNOVATION_HYPOTHESIS_REJECTION = PASS
+MODE_A_IDEMPOTENCY = PASS
+MODE_B_REGRESSION = PASS
+FOCUSED_TESTS = 52 passed
+FULL_REGRESSION = 736 passed, 34 skipped (PG), 3 deselected (live), 0 failed
+COMBINED_POSTGRESQL_TESTS = 36 passed (34 PRB-03/G05-T06 + 2 G06-T03A Mode A on PG)
+RUFF = PASS
+OPENAPI = PASS
+MIGRATIONS_CREATED = NO
+FINAL_SHA = <populated after commit>
+G06_T03_READY_TO_CLOSE = YES
+```

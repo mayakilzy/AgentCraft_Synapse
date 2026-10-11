@@ -288,6 +288,15 @@ class PrototypePlanRequest(BaseModel):
     run_id: str | None = Field(
         default=None, description="Optional retry identity for idempotent creation."
     )
+    hypothesis_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional explicit hypothesis selection for Mode A. "
+            "If provided, must belong to the linked innovation concept. "
+            "If omitted and exactly one hypothesis exists, auto-selected. "
+            "If omitted and multiple hypotheses exist, returns 422."
+        ),
+    )
 
 
 @router.post("/scenarios/{scenario_id}/prototype-plan", status_code=status.HTTP_200_OK)
@@ -326,6 +335,7 @@ async def prototype_plan_endpoint(
             execution_mode=body.execution_mode,
             safety_limits=body.safety_limits,
             cost_limits=body.cost_limits,
+            hypothesis_id=body.hypothesis_id,
             run_id=body.run_id,
             requester=str(principal),
         )

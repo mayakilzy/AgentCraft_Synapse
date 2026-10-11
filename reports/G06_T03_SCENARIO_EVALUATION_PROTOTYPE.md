@@ -344,7 +344,7 @@ RUFF = PASS
 OPENAPI = PASS
 MODIFIED_FILES = src/synapse/application/scenario_evaluator.py (NEW), src/synapse/application/prototype_planner.py (NEW), src/synapse/api/v1/future.py (modified), tests/integration/test_g06_t03_evaluation_prototype.py (NEW), tests/integration/test_g06_t02_scenario_construction.py (modified), tests/unit/api/test_system.py (modified)
 REMAINING_LIMITATIONS = scenario revision deferred to G06-T04; end-to-end acceptance deferred to G06-T04; assumption assessment uses evidence-ref overlap heuristic; evaluation does not persist uncertainty on scenario
-FINAL_SHA = <populated after commit>
+FINAL_SHA = 801f6f8ef1e1cd935e448c9fa9058cffb86820c3
 READY_FOR_G06_T04_REVIEW = YES
 ```
 

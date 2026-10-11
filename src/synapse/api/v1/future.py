@@ -1,20 +1,30 @@
-"""G06-T02 + G06-T03 — Future Intelligence API.
+"""G06-T02 + G06-T03 + G06-T04 — Future Intelligence API.
 
 Activates the future-intelligence endpoints:
-  - POST   /api/v1/future/signals                     (G06-T01)
-  - POST   /api/v1/future/scenarios                   (G06-T02)
-  - GET    /api/v1/future/scenarios/{scenario_id}     (G06-T02)
-  - POST   /api/v1/future/scenarios/{scenario_id}/evaluate       (G06-T03)
-  - POST   /api/v1/future/scenarios/{scenario_id}/prototype-plan (G06-T03)
+  - POST   /api/v1/future/signals                              (G06-T01)
+  - POST   /api/v1/future/scenarios                            (G06-T02)
+  - GET    /api/v1/future/scenarios/{scenario_id}              (G06-T02)
+  - POST   /api/v1/future/scenarios/{scenario_id}/evaluate             (G06-T03)
+  - POST   /api/v1/future/scenarios/{scenario_id}/prototype-plan       (G06-T03)
+  - POST   /api/v1/future/scenarios/{scenario_id}/reassess             (G06-T04)
+  - GET    /api/v1/future/scenarios/{scenario_id}/revisions            (G06-T04)
 
 Per the approved G06 plan (section 9):
 
 - Scenario creation and retrieval endpoints are functional (T02).
 - The future-signal endpoint exposes the G06-T01 service (T02).
-- The evaluate endpoint is functional (T03).
+- The evaluate endpoint is functional (T03). After ``evaluate_scenario()``
+  returns, the full evaluation snapshot is persisted in the scenario's
+  attributes JSON (via ``persist_evaluation_snapshot``) so that the
+  next ``reassess`` call can compare against a full prior snapshot.
 - The prototype-plan endpoint is functional (T03) with two-mode design:
   Mode A (linked innovation) delegates to plan_experiment(); Mode B
   (no linked innovation) returns a proposal.
+- The reassess endpoint (T04) is explicit-only — no background
+  scheduler. A revision is warranted only when material evaluation
+  fields differ from the prior authoritative snapshot.
+- The revisions endpoint (T04) returns the append-only revision history
+  (newest first) — prior snapshots are never overwritten.
 """
 
 from __future__ import annotations
@@ -29,6 +39,12 @@ from synapse.application.future_signal import identify_future_signals
 from synapse.application.prototype_planner import plan_prototype
 from synapse.application.scenario_builder import build_scenario, get_scenario
 from synapse.application.scenario_evaluator import evaluate_scenario
+from synapse.application.scenario_revision import (
+    VALID_TRIGGERS,
+    get_scenario_revisions,
+    persist_evaluation_snapshot,
+    reassess_scenario,
+)
 
 router = APIRouter(prefix="/future", tags=["future"])
 
@@ -243,7 +259,12 @@ async def evaluate_scenario_endpoint(
     provenance, dependency readiness, contradiction exposure, assumption
     assessment, horizon alignment, and an overall categorical result.
 
-    The evaluation is read-only — it does NOT modify the scenario.
+    The evaluation is read-only — it does NOT modify the scenario's
+    persisted fields. The full evaluation snapshot is persisted under
+    the scenario's ``last_evaluation`` attribute key (additive only) so
+    that the next ``/reassess`` call can compare against a full prior
+    snapshot, not just the summary fields recorded in the
+    ``scenario.evaluated`` audit row.
     """
     result = await evaluate_scenario(
         session,
@@ -252,6 +273,10 @@ async def evaluate_scenario_endpoint(
     )
     if result is None:
         raise NotFoundError(f"scenario {scenario_id!r} not found")
+    # Persist the full evaluation snapshot for future reassessment
+    # comparison. This is purely additive — the scenario's other
+    # fields are not modified.
+    await persist_evaluation_snapshot(session, scenario_id, result)
     return Envelope.success(
         data=result,
         request_id=request_id,
@@ -346,5 +371,107 @@ async def prototype_plan_endpoint(
         raise NotFoundError(f"scenario {scenario_id!r} not found")
     return Envelope.success(
         data=result,
+        request_id=request_id,
+    )
+
+
+# ── POST /api/v1/future/scenarios/{scenario_id}/reassess (G06-T04) ──────────
+
+
+class ReassessRequest(BaseModel):
+    """Request body for ``POST /api/v1/future/scenarios/{id}/reassess``."""
+
+    trigger: str = Field(
+        ...,
+        description=(
+            "Trigger of the reassessment. Must be one of: "
+            f"{sorted(VALID_TRIGGERS)}. "
+            "``explicit_reassess`` for caller-initiated re-evaluation; "
+            "``new_evidence`` when new evidence fragments or claims have "
+            "been added to the KB; ``new_experiment_result`` when a "
+            "linked experiment has finalized and the hypothesis state "
+            "may have changed."
+        ),
+    )
+    trigger_ref: str | None = Field(
+        default=None,
+        description=(
+            "Optional reference to the triggering artifact. For "
+            "``new_experiment_result``, this is typically the execution_id "
+            "or experiment_id. For ``new_evidence``, the fragment_id or "
+            "claim_id. May be None for ``explicit_reassess``."
+        ),
+    )
+
+
+@router.post("/scenarios/{scenario_id}/reassess", status_code=status.HTTP_200_OK)
+async def reassess_scenario_endpoint(
+    scenario_id: str,
+    body: ReassessRequest,
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+) -> Envelope[dict]:
+    """Reassess a persisted scenario (G06-T04).
+
+    Explicit reassessment only — no background scheduler. The service
+    recomputes the scenario evaluation against the current KB state and
+    compares against the prior authoritative evaluation snapshot on
+    material fields. If any material field differs (or no prior snapshot
+    exists), a revision is warranted: the scenario's version is bumped,
+    the new snapshot is persisted, and a ``scenario.revision`` audit
+    event is emitted (append-only). Otherwise, ``revised=false`` and no
+    audit row is written.
+
+    Material fields: ``evidence_coverage``, ``distinct_source_uri_count``,
+    ``independent_origin_count``, ``dependency_readiness``,
+    ``contradiction_exposure``, ``assumption_assessment``,
+    ``horizon_alignment``, ``overall``. Volatile metadata
+    (``evaluated_at``, request IDs) is excluded from the comparison.
+    """
+    try:
+        result = await reassess_scenario(
+            session,
+            scenario_id,
+            trigger=body.trigger,
+            trigger_ref=body.trigger_ref,
+            requester=str(principal),
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    if result is None:
+        raise NotFoundError(f"scenario {scenario_id!r} not found")
+    return Envelope.success(
+        data=result,
+        request_id=request_id,
+    )
+
+
+# ── GET /api/v1/future/scenarios/{scenario_id}/revisions (G06-T04) ─────────
+
+
+@router.get("/scenarios/{scenario_id}/revisions", status_code=status.HTTP_200_OK)
+async def list_revisions_endpoint(
+    scenario_id: str,
+    principal: PrincipalDep,
+    session: DbSessionDep,
+    request_id: RequestIDDep,
+) -> Envelope[list]:
+    """Return the scenario's revision history, newest first (G06-T04).
+
+    Append-only: prior revision snapshots are never overwritten. Each
+    revision carries the full prior and new evaluation snapshots, the
+    change summary, the trigger, and the provenance. Returns an empty
+    list if the scenario has never been revised.
+    """
+    # Verify the scenario exists (404 if not).
+    scenario = await get_scenario(session, scenario_id)
+    if scenario is None:
+        raise NotFoundError(f"scenario {scenario_id!r} not found")
+
+    revisions = await get_scenario_revisions(session, scenario_id)
+    return Envelope.success(
+        data=revisions,
         request_id=request_id,
     )

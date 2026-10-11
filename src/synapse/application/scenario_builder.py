@@ -238,26 +238,51 @@ async def build_scenario(
             "satisfy the frozen Scenario validator"
         )
 
-    # ── F4 (non-F0) requires at least one missing_dependency per the
-    #    frozen validator. If the caller overrode to F4 but no deps were
-    #    derived, populate from the capabilities themselves (they are the
-    #    unresolved integration points in a speculative scenario). ──────
+    # ── Non-F0 fail-closed (Correction A): the frozen Scenario validator
+    #    requires at least one missing_dependency for every non-F0
+    #    horizon. If no genuine, explicitly-supported unresolved
+    #    dependency exists, FAIL CLOSED. Do NOT manufacture a dependency
+    #    from the capability IDs — an existing capability is not
+    #    necessarily an unresolved dependency. The caller must supply
+    #    explicit missing_dependencies, or the builder must derive them
+    #    from gap analysis. If neither produces a genuine dependency,
+    #    the scenario cannot be constructed honestly. ──────────────────
     if final_horizon != HorizonClass.F0 and not final_missing_deps:
-        # Use the capability IDs as honest integration dependencies —
-        # they are real KB entities, and in a speculative scenario the
-        # integration itself is the unresolved dependency.
-        final_missing_deps = list(capability_ids)
+        raise ValueError(
+            f"Scenario with horizon_class={final_horizon.value} requires "
+            f"at least one genuine missing_dependency. No unresolved "
+            f"dependency was derived from the KB or supplied by the "
+            f"caller. Cannot fabricate a dependency to satisfy the "
+            f"frozen Scenario validator — supply explicit "
+            f"missing_dependencies that resolve to real KB entities "
+            f"with genuinely unresolved integration."
+        )
 
     # ── Compute the scenario fingerprint (idempotency) ─────────────────
     effective_run_id = run_id if run_id else uuid4().hex
 
-    # ── Check for conflicting-payload retry BEFORE claiming ────────────
-    # If the caller passed a run_id, check whether a scenario with that
-    # run_id already exists but with a different payload. This catches
-    # the "same run_id + conflicting payload" case that the fingerprint
-    # claim alone cannot detect (different payload → different fingerprint
-    # → claim wins → no conflict detected).
+    # ── Concurrent conflicting-retry protection (Correction B) ────────
+    # If the caller passed a run_id, acquire a transaction-scoped
+    # advisory lock on a hash of the run_id BEFORE checking for an
+    # existing scenario. This guarantees that only one transaction at a
+    # time can create a scenario for a given run_id. Without this lock,
+    # two concurrent requests with the same run_id but different payloads
+    # could both observe no existing scenario (pre-commit) and both
+    # proceed to create — producing two scenarios with the same run_id.
+    #
+    # On PostgreSQL: pg_advisory_xact_lock serializes by run_id hash.
+    #   - Transaction-scoped (released on commit/rollback automatically)
+    #   - Non-blocking for DIFFERENT run_ids (parallelism preserved)
+    #   - Bounded (pg_advisory_xact_lock waits until holder commits)
+    #
+    # On SQLite: advisory locks are not available, but SQLite serializes
+    # all writes at the DB level (single-writer). The pre-check is safe
+    # because no other transaction can be concurrently writing.
     if run_id:
+        await _acquire_run_id_lock(session, run_id)
+
+        # Now we hold the lock — check for an existing scenario with this
+        # run_id. If found, compare payload (reuse or conflict).
         existing_with_run_id = await _find_scenario_by_run_id(session, run_id)
         if existing_with_run_id is not None:
             existing_attrs = _safe_json_loads(existing_with_run_id.attributes)
@@ -903,6 +928,32 @@ async def _load_scenario_entity(
         EntityRow.kind == "scenario",
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _acquire_run_id_lock(session: AsyncSession, run_id: str) -> None:
+    """Acquire a transaction-scoped advisory lock on a hash of run_id.
+
+    This serializes concurrent build_scenario calls that use the same
+    run_id, preventing the race where two transactions both observe no
+    existing scenario (pre-commit) and both proceed to create.
+
+    On PostgreSQL: uses pg_advisory_xact_lock (transaction-scoped,
+    released on commit/rollback). Non-blocking for different run_ids.
+
+    On SQLite: advisory locks are not available, but SQLite serializes
+    all writes at the DB level (single-writer), so the pre-check is
+    safe without an explicit lock.
+    """
+    dialect_name = session.bind.dialect.name if session.bind else "unknown"
+    if dialect_name == "postgresql":
+        from sqlalchemy import text
+
+        lock_key = int.from_bytes(
+            hashlib.sha256(f"scenario_run_id:{run_id}".encode()).digest()[:8],
+            "little",
+            signed=True,
+        )
+        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
 
 
 async def _find_scenario_by_run_id(

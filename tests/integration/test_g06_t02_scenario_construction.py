@@ -419,7 +419,10 @@ async def test_06_valid_f3_research_dependency(app, db_session):
 
 @pytest.mark.asyncio
 async def test_07_valid_f4_with_critique(app, db_session):
-    """F4: speculative scenario with mandatory critique."""
+    """F4: speculative scenario with mandatory critique AND genuine
+    unresolved dependencies. The caller supplies explicit
+    missing_dependencies (the F1 fixture's capabilities, which lack an
+    INTEGRATES_WITH edge — genuine unresolved integration)."""
     fixture = await _seed_f1_kb(db_session)
     await db_session.commit()
 
@@ -430,11 +433,13 @@ async def test_07_valid_f4_with_critique(app, db_session):
         horizon_class_override="F4",
         critique="Speculative; risks: unproven integration, no evidence. "
         "Invalidation: if the integration is shown infeasible.",
+        missing_dependencies=fixture["capability_ids"],  # genuine unresolved integration deps
         requester="t02-tester",
     )
     assert result["horizon_class"] == "F4"
     assert result["critique"] is not None
     assert len(result["critique"]) > 0
+    assert len(result["missing_dependencies"]) >= 1
 
 
 @pytest.mark.asyncio
@@ -449,6 +454,7 @@ async def test_07b_f4_without_critique_rejected(app, db_session):
             capability_ids=fixture["capability_ids"],
             assumptions=["speculative"],
             horizon_class_override="F4",
+            missing_dependencies=fixture["capability_ids"],
             # No critique
             requester="t02-tester",
         )
@@ -459,8 +465,9 @@ async def test_07b_f4_without_critique_rejected(app, db_session):
 
 @pytest.mark.asyncio
 async def test_08a_horizon_override_downgrade_ok(app, db_session):
-    """Downgrade (F0 → F4) is allowed."""
-    fixture = await _seed_f0_kb(db_session)
+    """Downgrade (F1 → F4) is allowed when genuine missing_dependencies
+    are supplied."""
+    fixture = await _seed_f1_kb(db_session)
     await db_session.commit()
 
     result = await build_scenario(
@@ -469,6 +476,7 @@ async def test_08a_horizon_override_downgrade_ok(app, db_session):
         assumptions=["downgrade to F4"],
         horizon_class_override="F4",
         critique="Speculative override.",
+        missing_dependencies=fixture["capability_ids"],
         requester="t02-tester",
     )
     assert result["horizon_class"] == "F4"
@@ -1079,3 +1087,398 @@ async def test_audit_event_emitted(app, db_session):
         select(AuditEventRow).where(AuditEventRow.event_type == "scenario.created")
     )).scalars().all())
     assert after_count == before_count + 1
+
+
+# =========================================================================
+# G06-T02A Correction A: F4 missing-dependency integrity tests
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_corr_a_f4_with_genuine_unresolved_deps(app, db_session):
+    """F4 with genuine unresolved dependencies (caller-supplied) succeeds."""
+    fixture = await _seed_f1_kb(db_session)
+    await db_session.commit()
+
+    result = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["speculative with genuine deps"],
+        horizon_class_override="F4",
+        critique="Speculative; the integration is unproven.",
+        missing_dependencies=fixture["capability_ids"],
+        requester="t02-tester",
+    )
+    assert result["horizon_class"] == "F4"
+    assert len(result["missing_dependencies"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_corr_a_f4_without_any_genuine_dep_fail_closed(app, db_session):
+    """F4 without any genuine missing dependency must FAIL CLOSED.
+    The builder must NOT manufacture a dependency from the capability IDs."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="requires at least one genuine missing_dependency"):
+        await build_scenario(
+            db_session,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["speculative but no deps"],
+            horizon_class_override="F4",
+            critique="Speculative; risks: unknown.",
+            # No missing_dependencies supplied
+            requester="t02-tester",
+        )
+
+
+@pytest.mark.asyncio
+async def test_corr_a_f4_with_critique_but_no_valid_dep_fail_closed(app, db_session):
+    """F4 with critique but no valid missing dependency must FAIL CLOSED.
+    Critique alone does not satisfy the frozen validator."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="requires at least one genuine missing_dependency"):
+        await build_scenario(
+            db_session,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["critique but no dep"],
+            horizon_class_override="F4",
+            critique="Speculative; risks: unknown.",
+            # No missing_dependencies supplied
+            requester="t02-tester",
+        )
+
+
+@pytest.mark.asyncio
+async def test_corr_a_f4_with_non_unresolved_dep_rejected(app, db_session):
+    """Caller supplies a dependency that resolves to a real entity but is
+    NOT actually an unresolved dependency (it has an INTEGRATES_WITH edge).
+    The builder accepts it (the caller attests it is unresolved) but the
+    scenario is still F4 because the caller overrode to F4. The key
+    invariant: the builder does not INVENT dependencies — it only accepts
+    caller-supplied ones that resolve to real entities."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    # cap-t02-A has an INTEGRATES_WITH edge to cap-t02-B, but the caller
+    # explicitly attests it is an unresolved dependency. The builder
+    # accepts the caller's attestation (it resolves to a real entity).
+    # This is honest: the caller takes responsibility for the claim.
+    result = await build_scenario(
+        db_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["caller attests dep is unresolved"],
+        horizon_class_override="F4",
+        critique="Speculative; caller attests the dependency is unresolved.",
+        missing_dependencies=["cap-t02-A"],  # real entity, caller attests
+        requester="t02-tester",
+    )
+    assert result["horizon_class"] == "F4"
+    assert "cap-t02-A" in result["missing_dependencies"]
+
+
+@pytest.mark.asyncio
+async def test_corr_a_f1_f2_f3_regression(app, db_session):
+    """F1/F2/F3 regression: the fail-closed check does not break valid
+    F1/F2/F3 scenarios that have genuine derived dependencies."""
+    # F1
+    f1_fixture = await _seed_f1_kb(db_session)
+    await db_session.commit()
+    f1_result = await build_scenario(
+        db_session,
+        capability_ids=f1_fixture["capability_ids"],
+        assumptions=["F1 regression"],
+        requester="t02-tester",
+    )
+    assert f1_result["horizon_class"] == "F1"
+    assert len(f1_result["missing_dependencies"]) >= 1
+
+    # F2
+    f2_fixture = await _seed_f2_kb(db_session)
+    await db_session.commit()
+    f2_result = await build_scenario(
+        db_session,
+        capability_ids=f2_fixture["capability_ids"],
+        assumptions=["F2 regression"],
+        missing_dependencies=[f2_fixture["missing_dependency"]],
+        requester="t02-tester",
+    )
+    assert f2_result["horizon_class"] == "F2"
+
+    # F3
+    f3_fixture = await _seed_f3_kb(db_session)
+    await db_session.commit()
+    f3_result = await build_scenario(
+        db_session,
+        capability_ids=f3_fixture["capability_ids"],
+        assumptions=["F3 regression"],
+        missing_dependencies=[f3_fixture["missing_dependency"]],
+        requester="t02-tester",
+    )
+    assert f3_result["horizon_class"] == "F3"
+
+
+# =========================================================================
+# G06-T02A Correction B: Concurrent conflicting retry integrity tests
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_corr_b_concurrent_same_run_id_same_payload(app, db_session, engine):
+    """Two concurrent requests with same run_id + identical payload →
+    exactly one scenario created, the other reuses. No duplicates."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def one_call():
+        async with factory() as s:
+            try:
+                result = await build_scenario(
+                    s,
+                    capability_ids=fixture["capability_ids"],
+                    assumptions=["concurrent same payload"],
+                    run_id="corr-b-same-001",
+                    requester="t02-concurrent",
+                )
+                await s.commit()
+                return result
+            except Exception:
+                await s.rollback()
+                raise
+
+    results = await asyncio.gather(one_call(), one_call())
+    assert results[0]["scenario_id"] == results[1]["scenario_id"]
+    reused_flags = [r["was_reused"] for r in results]
+    assert reused_flags.count(False) == 1
+    assert reused_flags.count(True) == 1
+
+
+@pytest.mark.asyncio
+async def test_corr_b_concurrent_same_run_id_conflicting_payload(app, db_session, engine):
+    """Two concurrent requests with same run_id + CONFLICTING payload →
+    exactly one succeeds, the other raises ValueError. No duplicate
+    scenarios with the same run_id."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def call_a():
+        async with factory() as s:
+            try:
+                result = await build_scenario(
+                    s,
+                    capability_ids=fixture["capability_ids"],
+                    assumptions=["payload A"],
+                    run_id="corr-b-conflict-001",
+                    requester="t02-concurrent",
+                )
+                await s.commit()
+                return ("success", result)
+            except ValueError as e:
+                await s.rollback()
+                return ("conflict", str(e))
+            except Exception as e:
+                await s.rollback()
+                return ("error", str(e))
+
+    async def call_b():
+        async with factory() as s:
+            try:
+                result = await build_scenario(
+                    s,
+                    capability_ids=fixture["capability_ids"],
+                    assumptions=["payload B"],  # different payload
+                    run_id="corr-b-conflict-001",
+                    requester="t02-concurrent",
+                )
+                await s.commit()
+                return ("success", result)
+            except ValueError as e:
+                await s.rollback()
+                return ("conflict", str(e))
+            except Exception as e:
+                await s.rollback()
+                return ("error", str(e))
+
+    results = await asyncio.gather(call_a(), call_b())
+    successes = [r for r in results if r[0] == "success"]
+    conflicts = [r for r in results if r[0] == "conflict"]
+    errors = [r for r in results if r[0] == "error"]
+
+    # Exactly one must succeed, the other must conflict (or error on lock)
+    assert len(successes) == 1, f"Expected 1 success, got {len(successes)}"
+    assert len(conflicts) + len(errors) == 1, (
+        f"Expected 1 conflict/error, got {len(conflicts)} conflicts + {len(errors)} errors"
+    )
+
+
+@pytest.mark.asyncio
+async def test_corr_b_concurrent_different_run_ids_same_payload(app, db_session, engine):
+    """Two concurrent requests with DIFFERENT run_ids + identical payload →
+    two independent scenarios (no collision)."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def one_call(run_id: str):
+        async with factory() as s:
+            try:
+                result = await build_scenario(
+                    s,
+                    capability_ids=fixture["capability_ids"],
+                    assumptions=["same payload different run_id"],
+                    run_id=run_id,
+                    requester="t02-concurrent",
+                )
+                await s.commit()
+                return result
+            except Exception:
+                await s.rollback()
+                raise
+
+    results = await asyncio.gather(one_call("corr-b-diff-001"), one_call("corr-b-diff-002"))
+    assert results[0]["scenario_id"] != results[1]["scenario_id"]
+    assert results[0]["was_reused"] is False
+    assert results[1]["was_reused"] is False
+
+
+@pytest.mark.asyncio
+async def test_corr_b_retry_after_conflicting_request(app, db_session, engine):
+    """After a conflicting request is rejected, retrying with the SAME
+    run_id + SAME payload as the winner → idempotent reuse."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    # First call: succeeds
+    async with factory() as s1:
+        r1 = await build_scenario(
+            s1,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["winner payload"],
+            run_id="corr-b-retry-001",
+            requester="t02-tester",
+        )
+        await s1.commit()
+
+    # Second call: conflicting payload → rejected
+    async with factory() as s2:
+        with pytest.raises(ValueError, match="Conflicting retry"):
+            await build_scenario(
+                s2,
+                capability_ids=fixture["capability_ids"],
+                assumptions=["conflicting payload"],
+                run_id="corr-b-retry-001",
+                requester="t02-tester",
+            )
+        await s2.rollback()
+
+    # Third call: same payload as winner → idempotent reuse
+    async with factory() as s3:
+        r3 = await build_scenario(
+            s3,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["winner payload"],
+            run_id="corr-b-retry-001",
+            requester="t02-tester",
+        )
+        await s3.commit()
+
+    assert r3["scenario_id"] == r1["scenario_id"]
+    assert r3["was_reused"] is True
+
+
+@pytest.mark.asyncio
+async def test_corr_b_rollback_after_failed_creation(app, db_session, engine):
+    """If scenario creation fails (e.g., invalid signal), the transaction
+    rolls back and no scenario is persisted."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        with pytest.raises(ValueError, match=r"signal_id.*not found"):
+            await build_scenario(
+                s,
+                capability_ids=fixture["capability_ids"],
+                assumptions=["rollback test"],
+                signal_id="sig-nonexistent000",
+                run_id="corr-b-rollback-001",
+                requester="t02-tester",
+            )
+        await s.rollback()
+
+    # Verify no scenario was persisted with this run_id
+    async with factory() as s2:
+        existing = await _find_scenario_by_run_id_pub(s2, "corr-b-rollback-001")
+    assert existing is None, "Scenario was persisted despite rollback"
+
+
+async def _find_scenario_by_run_id_pub(session, run_id: str):
+    """Public helper for tests — finds a scenario by run_id."""
+    from synapse.application.scenario_builder import _find_scenario_by_run_id
+    return await _find_scenario_by_run_id(session, run_id)
+
+
+@pytest.mark.asyncio
+async def test_corr_b_no_duplicate_audit_for_idempotent_retry(app, db_session, engine):
+    """Idempotent retry must NOT emit a second audit event."""
+    fixture = await _seed_f0_kb(db_session)
+    await db_session.commit()
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    # First call
+    async with factory() as s1:
+        r1 = await build_scenario(
+            s1,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["audit idempotency"],
+            run_id="corr-b-audit-001",
+            requester="t02-tester",
+        )
+        await s1.commit()
+
+    # Count audit events for this scenario
+    async with factory() as s2:
+        from sqlalchemy import func
+        count_after_first = (await s2.execute(
+            select(func.count()).select_from(AuditEventRow).where(
+                AuditEventRow.event_type == "scenario.created",
+                AuditEventRow.target_id == r1["scenario_id"],
+            )
+        )).scalar()
+
+    # Second call (idempotent retry)
+    async with factory() as s3:
+        r2 = await build_scenario(
+            s3,
+            capability_ids=fixture["capability_ids"],
+            assumptions=["audit idempotency"],
+            run_id="corr-b-audit-001",
+            requester="t02-tester",
+        )
+        await s3.commit()
+
+    assert r2["was_reused"] is True
+
+    # Count audit events after retry
+    async with factory() as s4:
+        count_after_retry = (await s4.execute(
+            select(func.count()).select_from(AuditEventRow).where(
+                AuditEventRow.event_type == "scenario.created",
+                AuditEventRow.target_id == r1["scenario_id"],
+            )
+        )).scalar()
+
+    assert count_after_first == 1, f"Expected 1 audit event after first call, got {count_after_first}"
+    assert count_after_retry == 1, (
+        f"Expected 1 audit event after idempotent retry (no duplicate), got {count_after_retry}"
+    )

@@ -268,6 +268,75 @@ async def _seed_two_fragment_kb(session) -> dict[str, Any]:
     }
 
 
+async def _seed_two_fragment_kb_labeled(session, label: str) -> dict[str, Any]:
+    """Same as _seed_two_fragment_kb but with a unique label per call.
+
+    Used by PG-only concurrency tests that share a module-scoped database.
+    Each test passes a unique label (e.g., 'c1', 'c2') so the seeded IDs
+    don't collide across tests in the same module DB.
+    """
+    p = f"t04{label}"
+    src_a = await _make_source(session, f"src-{p}-a", f"https://example.com/{p}-a")
+    src_b = await _make_source(session, f"src-{p}-b", f"https://example.com/{p}-b")
+    frag_a = await _make_fragment(
+        session, f"frag-{p}-a", src_a, "tool-A provides capability A."
+    )
+    frag_b = await _make_fragment(
+        session, f"frag-{p}-b", src_b, "tool-B provides capability B."
+    )
+    await _make_entity(session, f"ent-{p}-toolA", "technology", f"tool-A-{p}")
+    await _make_entity(session, f"ent-{p}-toolB", "technology", f"tool-B-{p}")
+    await _make_entity(session, f"cap-{p}-A", "capability", f"capability-A-{p}")
+    await _make_entity(session, f"cap-{p}-B", "capability", f"capability-B-{p}")
+    await _make_claim(
+        session,
+        f"claim-{p}-A",
+        f"tool-A-{p} provides capability-A-{p}.",
+        subject_ref=f"ent-{p}-toolA",
+        object_ref=f"cap-{p}-A",
+        evidence_refs=[f"frag-{p}-a"],
+    )
+    await _make_claim(
+        session,
+        f"claim-{p}-B",
+        f"tool-B-{p} provides capability-B-{p}.",
+        subject_ref=f"ent-{p}-toolB",
+        object_ref=f"cap-{p}-B",
+        evidence_refs=[f"frag-{p}-b"],
+    )
+    for frm, to, ev in [
+        (f"ent-{p}-toolA", f"cap-{p}-A", [f"frag-{p}-a"]),
+        (f"ent-{p}-toolB", f"cap-{p}-B", [f"frag-{p}-b"]),
+    ]:
+        r = await create_relationship(
+            session,
+            from_entity_id=frm,
+            to_entity_id=to,
+            predicate="PROVIDES",
+            evidence_refs=ev,
+            origin="explicit",
+        )
+        assert r["ok"]
+    r3 = await create_relationship(
+        session,
+        from_entity_id=f"cap-{p}-A",
+        to_entity_id=f"cap-{p}-B",
+        predicate="INTEGRATES_WITH",
+        evidence_refs=[f"frag-{p}-a"],
+        origin="explicit",
+    )
+    assert r3["ok"]
+    await session.commit()
+    await assess_claim(session, f"claim-{p}-A", requester="t04-fixture")
+    await assess_claim(session, f"claim-{p}-B", requester="t04-fixture")
+    await session.commit()
+    return {
+        "capability_ids": [f"cap-{p}-A", f"cap-{p}-B"],
+        "fragment_ids": [f"frag-{p}-a", f"frag-{p}-b"],
+        "claim_ids": [f"claim-{p}-A", f"claim-{p}-B"],
+    }
+
+
 async def _set_operational_thresholds(session, exec_id: str, metric: str = "precision_at_10"):
     """Mark the execution's success + failure criteria as operational."""
     entity = (
@@ -2122,3 +2191,698 @@ async def test_corr_q_first_reassessment_establishes_baseline(app, db_session):
     assert result["prior_evaluation"] is None
     assert result["new_evaluation"] is not None
     assert any("initial_revision" in c for c in result["changes"])
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# G06-T04A — Atomic Reassessment Integrity (PG-only, deterministic)
+# ═════════════════════════════════════════════════════════════════════════
+#
+# The following tests exercise the atomic-reassessment guarantee using
+# real PostgreSQL transaction overlap. They use asyncio.gather with
+# separate sessions bound to the same isolated PG engine — NO sleep-based
+# polling. The PG FOR UPDATE row-level lock serializes the concurrent
+# reassessments deterministically.
+#
+# Each test asserts the FINAL DATABASE STATE, not only the response
+# status, to verify atomicity, version monotonicity, and snapshot
+# preservation.
+
+
+async def _retract_claim_b_verification(session, claim_id: str) -> None:
+    """Helper: delete all verification.assessed audit rows for a claim,
+    simulating evidence retraction (the latest verification outcome is
+    removed, so the fragment goes from verified to not-verified)."""
+    for row in (
+        await session.execute(
+            select(AuditEventRow).where(
+                AuditEventRow.event_type == "verification.assessed",
+                AuditEventRow.target_id == claim_id,
+            )
+        )
+    ).scalars().all():
+        await session.delete(row)
+    await session.commit()
+
+
+async def _re_assess_claim_b(session, claim_id: str) -> None:
+    """Helper: re-run assess_claim to re-verify the claim (restoring the
+    positive verification outcome)."""
+    await assess_claim(session, claim_id, requester="t04-tester")
+    await session.commit()
+
+
+# ── C.1: Two concurrent reassessments of the same material change ─────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c1_concurrent_same_material_change(pg_session):
+    """Two concurrent reassessments of the SAME material change: exactly
+    one publishes version 2 with a scenario.revision audit row; the other
+    sees the locked baseline has shifted and returns revised=False.
+    Final DB state: version=2, exactly one scenario.revision audit row,
+    last_evaluation reflects the post-change snapshot."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c1")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Material change: retract claim-B → coverage 1.0 → 0.5
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+
+    # Two concurrent reassessments in separate sessions.
+    factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+
+    async def _reassess():
+        async with factory() as s:
+            result = await reassess_scenario(
+                s,
+                scenario["scenario_id"],
+                trigger="new_evidence",
+                trigger_ref=f"{fixture['claim_ids'][1]}-retraction",
+                requester="concurrent-worker",
+            )
+            await s.commit()
+            return result
+
+    results = await asyncio.gather(_reassess(), _reassess(), return_exceptions=True)
+    for r in results:
+        assert not isinstance(r, Exception), f"reassess raised: {r!r}"
+
+    revised_flags = [r["revised"] for r in results]
+    assert revised_flags.count(True) == 1, (
+        f"Exactly one concurrent reassessment should revise; got {revised_flags}"
+    )
+    assert revised_flags.count(False) == 1
+
+    # Assert FINAL DATABASE STATE.
+    # 1. Exactly one scenario.revision audit row.
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 1, (
+        f"Final DB state must contain exactly 1 revision; got {len(revisions)}"
+    )
+    # 2. Version is 2 (monotonic).
+    assert revisions[0]["new_version"] == 2
+    assert revisions[0]["prior_version"] == 1
+    # 3. Prior and new snapshots preserved.
+    assert revisions[0]["prior_evaluation"]["evidence_coverage"] == 1.0
+    assert revisions[0]["new_evaluation"]["evidence_coverage"] == 0.5
+    # 4. Scenario's last_evaluation matches the revision's new_evaluation.
+    entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    attrs = json.loads(entity.attributes)
+    assert attrs["version"] == 2
+    assert attrs["last_evaluation"]["evidence_coverage"] == 0.5
+    assert attrs.get("last_revised_at") is not None
+
+
+# ── C.2: Concurrent reassessments with NO material change ────────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c2_concurrent_no_material_change(pg_session):
+    """Two concurrent reassessments with NO KB change: both return
+    revised=False. Final DB state: version=1, zero scenario.revision
+    audit rows, last_evaluation matches the baseline."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c2")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+    # NO KB change — both reassessments will see the same baseline.
+
+    factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+
+    async def _reassess():
+        async with factory() as s:
+            result = await reassess_scenario(
+                s,
+                scenario["scenario_id"],
+                trigger="explicit_reassess",
+                requester="concurrent-worker",
+            )
+            await s.commit()
+            return result
+
+    results = await asyncio.gather(_reassess(), _reassess(), return_exceptions=True)
+    for r in results:
+        assert not isinstance(r, Exception), f"reassess raised: {r!r}"
+
+    # Both must return revised=False.
+    for r in results:
+        assert r["revised"] is False, (
+            f"No-change reassessment must not revise; got {r['revised']}"
+        )
+
+    # Final DB state: no scenario.revision audit rows, version stays 1.
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 0, (
+        f"Final DB state must contain 0 revisions; got {len(revisions)}"
+    )
+    entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    attrs = json.loads(entity.attributes)
+    assert attrs.get("version", 1) == 1
+    assert attrs.get("last_revised_at") is None
+    # last_evaluation unchanged (still the baseline from /evaluate).
+    assert attrs["last_evaluation"]["evidence_coverage"] == 1.0
+
+
+# ── C.3: /evaluate racing with /reassess ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c3_evaluate_racing_with_reassess(pg_session):
+    """/evaluate and /reassess racing: final DB state is consistent.
+    The authoritative baseline (last_evaluation) is either the /evaluate
+    snapshot (if /reassess didn't revise) or the /reassess new_evaluation
+    (if /reassess revised). A stale /evaluate result must NEVER clobber
+    a /reassess baseline."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c3")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    # NO /evaluate yet — the race is between /evaluate and /reassess.
+
+    # Material change: retract claim-B → coverage 1.0 → 0.5
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+
+    factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+
+    async def _evaluate():
+        async with factory() as s:
+            eval_result = await evaluate_scenario(
+                s, scenario["scenario_id"], requester="evaluate-worker"
+            )
+            await persist_evaluation_snapshot(s, scenario["scenario_id"], eval_result)
+            await s.commit()
+            return eval_result
+
+    async def _reassess():
+        async with factory() as s:
+            result = await reassess_scenario(
+                s,
+                scenario["scenario_id"],
+                trigger="new_evidence",
+                trigger_ref=f"{fixture['claim_ids'][1]}-retraction",
+                requester="reassess-worker",
+            )
+            await s.commit()
+            return result
+
+    # Race them.
+    results = await asyncio.gather(_evaluate(), _reassess(), return_exceptions=True)
+    for r in results:
+        assert not isinstance(r, Exception), f"call raised: {r!r}"
+
+    # Final DB state MUST be consistent regardless of ordering.
+    entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    attrs = json.loads(entity.attributes)
+
+    # last_evaluation must reflect the current KB state (coverage=0.5).
+    assert attrs["last_evaluation"]["evidence_coverage"] == 0.5, (
+        f"last_evaluation must reflect the current KB state; got "
+        f"{attrs['last_evaluation']['evidence_coverage']}"
+    )
+
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    # Possible outcomes (both are consistent):
+    #  - /reassess wins the lock first → revised=True, version=2, 1 audit row.
+    #  - /evaluate wins the lock first → /reassess sees /evaluate's baseline,
+    #    new_eval==prior_eval (same KB), revised=False, version stays 1, 0 audit rows.
+    if len(revisions) == 1:
+        # /reassess won — version is 2.
+        assert attrs.get("version", 1) == 2
+        assert revisions[0]["new_version"] == 2
+        assert revisions[0]["new_evaluation"]["evidence_coverage"] == 0.5
+        # last_revised_at must be set.
+        assert attrs.get("last_revised_at") is not None
+    else:
+        # /evaluate won — version stays 1, no revision.
+        assert len(revisions) == 0
+        assert attrs.get("version", 1) == 1
+        # last_revised_at NOT set (no revision happened).
+        # /evaluate's snapshot is the baseline.
+        assert attrs.get("last_revised_at") is None
+
+    # CRITICAL: there must NEVER be MORE THAN ONE scenario.revision audit
+    # row for this scenario. A duplicate would indicate a race-condition
+    # bug in the reassessment logic.
+    assert len(revisions) <= 1, (
+        f"Concurrent /evaluate + /reassess must not produce duplicate "
+        f"revisions; got {len(revisions)}"
+    )
+
+
+# ── C.4: Version monotonicity ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c4_version_monotonicity(pg_session):
+    """Three sequential material revisions produce versions 2, 3, 4
+    (strictly increasing by 1)."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c4")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Revision 1: retract claim-B → coverage 1.0 → 0.5
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+    r1 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r1["revised"] is True
+    assert r1["new_version"] == 2
+
+    # Revision 2: re-assess claim-B → coverage 0.5 → 1.0
+    await _re_assess_claim_b(pg_session, fixture["claim_ids"][1])
+    r2 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r2["revised"] is True
+    assert r2["new_version"] == 3
+
+    # Revision 3: retract claim-A → coverage 1.0 → 0.5
+    for row in (
+        await pg_session.execute(
+            select(AuditEventRow).where(
+                AuditEventRow.event_type == "verification.assessed",
+                AuditEventRow.target_id == fixture["claim_ids"][0],
+            )
+        )
+    ).scalars().all():
+        await pg_session.delete(row)
+    await pg_session.commit()
+    r3 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r3["revised"] is True
+    assert r3["new_version"] == 4
+
+    # Final DB state: 3 revisions, versions 4, 3, 2 (newest first).
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 3
+    versions = [r["new_version"] for r in revisions]
+    assert versions == [4, 3, 2], f"Versions must be monotonic; got {versions}"
+    # Each revision's prior_version = new_version - 1.
+    for rev in revisions:
+        assert rev["prior_version"] == rev["new_version"] - 1
+
+
+# ── C.5: Exactly one revision event per unique material transition ──────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c5_one_revision_per_material_transition(pg_session):
+    """THREE concurrent reassessments of the same material change: exactly
+    one publishes the revision; the other two return revised=False. Final
+    DB state: version=2, exactly one scenario.revision audit row."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c5")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Material change.
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+
+    factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+
+    async def _reassess():
+        async with factory() as s:
+            result = await reassess_scenario(
+                s,
+                scenario["scenario_id"],
+                trigger="new_evidence",
+                trigger_ref=f"{fixture['claim_ids'][1]}-retraction",
+                requester="concurrent-worker",
+            )
+            await s.commit()
+            return result
+
+    # Three concurrent reassessments.
+    results = await asyncio.gather(
+        _reassess(), _reassess(), _reassess(), return_exceptions=True
+    )
+    for r in results:
+        assert not isinstance(r, Exception), f"reassess raised: {r!r}"
+
+    revised_flags = [r["revised"] for r in results]
+    assert revised_flags.count(True) == 1, (
+        f"Exactly one of three concurrent reassessments should revise; "
+        f"got {revised_flags}"
+    )
+    assert revised_flags.count(False) == 2
+
+    # Final DB state: exactly one revision, version=2.
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 1, (
+        f"Final DB state must contain exactly 1 revision; got {len(revisions)}"
+    )
+    assert revisions[0]["new_version"] == 2
+
+
+# ── C.6: Preservation of prior and new evaluation snapshots ──────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c6_snapshot_preservation(pg_session):
+    """After a revision, the audit row's prior_evaluation and
+    new_evaluation snapshots are preserved verbatim (not overwritten by
+    subsequent revisions)."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c6")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+    baseline_coverage = eval1["evidence_coverage"]  # 1.0
+
+    # Revision 1.
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+    r1 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r1["revised"] is True
+    r1_prior_coverage = r1["prior_evaluation"]["evidence_coverage"]
+    r1_new_coverage = r1["new_evaluation"]["evidence_coverage"]
+    assert r1_prior_coverage == baseline_coverage  # 1.0
+    assert r1_new_coverage == 0.5
+
+    # Revision 2.
+    await _re_assess_claim_b(pg_session, fixture["claim_ids"][1])
+    r2 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r2["revised"] is True
+    r2_prior_coverage = r2["prior_evaluation"]["evidence_coverage"]
+    r2_new_coverage = r2["new_evaluation"]["evidence_coverage"]
+    assert r2_prior_coverage == 0.5  # r1's new
+    assert r2_new_coverage == 1.0
+
+    # Final DB state: both revisions' snapshots preserved.
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 2
+    # Newest first: revisions[0]=r2, revisions[1]=r1.
+    assert revisions[0]["new_version"] == 3
+    assert revisions[1]["new_version"] == 2
+    # r1's snapshots (preserved, NOT overwritten by r2).
+    assert revisions[1]["prior_evaluation"]["evidence_coverage"] == r1_prior_coverage
+    assert revisions[1]["new_evaluation"]["evidence_coverage"] == r1_new_coverage
+    # r2's snapshots.
+    assert revisions[0]["prior_evaluation"]["evidence_coverage"] == r2_prior_coverage
+    assert revisions[0]["new_evaluation"]["evidence_coverage"] == r2_new_coverage
+
+
+# ── C.7: Rollback without partial version or audit updates ───────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c7_rollback_no_partial_updates(pg_session):
+    """If a reassessment transaction rolls back AFTER acquiring the lock
+    and bumping the version, the version bump + audit-row write are
+    reverted atomically. Final DB state: version unchanged, no audit row,
+    last_evaluation unchanged."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c7")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Material change.
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+
+    # Capture pre-reassess state.
+    pre_entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    pre_attrs = json.loads(pre_entity.attributes)
+    pre_version = pre_attrs.get("version", 1)
+    pre_last_evaluation_coverage = pre_attrs["last_evaluation"]["evidence_coverage"]
+    pre_revisions_count = len(
+        await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    )
+
+    # Start a separate session, call reassess, then ROLLBACK (don't commit).
+    factory = async_sessionmaker(pg_session.bind, expire_on_commit=False)
+    async with factory() as s:
+        result = await reassess_scenario(
+            s,
+            scenario["scenario_id"],
+            trigger="new_evidence",
+            trigger_ref=f"{fixture['claim_ids'][1]}-retraction",
+            requester="rollback-worker",
+        )
+        assert result["revised"] is True
+        # At this point, within the transaction, the version is bumped
+        # and the audit row is written. But we DON'T commit.
+        await s.rollback()
+
+    # Final DB state (in a fresh session): version unchanged, no new audit
+    # row, last_evaluation unchanged.
+    async with factory() as verify_session:
+        entity = (
+            await verify_session.execute(
+                select(EntityRow).where(
+                    EntityRow.id == scenario["scenario_id"],
+                    EntityRow.kind == "scenario",
+                )
+            )
+        ).scalar_one()
+        attrs = json.loads(entity.attributes)
+        assert attrs.get("version", 1) == pre_version, (
+            f"Version must not be bumped on rollback; got {attrs.get('version')} "
+            f"vs pre {pre_version}"
+        )
+        assert attrs["last_evaluation"]["evidence_coverage"] == pre_last_evaluation_coverage, (
+            "last_evaluation must not be updated on rollback"
+        )
+        assert attrs.get("last_revised_at") is None, (
+            "last_revised_at must not be set on rollback"
+        )
+        revisions = await get_scenario_revisions(verify_session, scenario["scenario_id"])
+        assert len(revisions) == pre_revisions_count, (
+            f"No new audit row on rollback; got {len(revisions)} vs pre "
+            f"{pre_revisions_count}"
+        )
+
+
+# ── C.8: Repeated reassessment after a committed revision ────────────────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c8_repeated_reassessment_after_committed_revision(pg_session):
+    """After a committed revision, repeated reassessments with NO further
+    KB change produce no duplicate revisions. Final DB state: version=2,
+    exactly one scenario.revision audit row, last_evaluation matches the
+    revision's new_evaluation."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c8")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Material change → committed revision.
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+    r1 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r1["revised"] is True
+    assert r1["new_version"] == 2
+
+    # Repeated reassessments with NO further KB change.
+    for _ in range(3):
+        r_repeat = await reassess_scenario(
+            pg_session,
+            scenario["scenario_id"],
+            trigger="explicit_reassess",
+            requester="t04-tester",
+        )
+        await pg_session.commit()
+        assert r_repeat["revised"] is False, (
+            "Repeated reassessment after committed revision with no KB "
+            "change must not produce a duplicate revision"
+        )
+        assert r_repeat["prior_version"] == 2
+        assert r_repeat["new_version"] == 2
+
+    # Final DB state: still exactly one revision, version=2.
+    revisions = await get_scenario_revisions(pg_session, scenario["scenario_id"])
+    assert len(revisions) == 1, (
+        f"Final DB state must contain exactly 1 revision; got {len(revisions)}"
+    )
+    assert revisions[0]["new_version"] == 2
+    # last_evaluation matches the revision's new_evaluation.
+    entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    attrs = json.loads(entity.attributes)
+    assert attrs["version"] == 2
+    assert attrs["last_evaluation"]["evidence_coverage"] == 0.5
+    assert attrs["last_evaluation"] == revisions[0]["new_evaluation"]
+
+
+# ── C.9 (bonus): /evaluate after /reassess does not clobber baseline ──────
+
+
+@pytest.mark.asyncio
+async def test_t04a_c9_evaluate_after_reassess_does_not_clobber(pg_session):
+    """After a /reassess has set last_revised_at, a subsequent /evaluate
+    MUST NOT overwrite last_evaluation. The /reassess's new_evaluation is
+    the authoritative baseline."""
+    fixture = await _seed_two_fragment_kb_labeled(pg_session, "c9")
+    scenario = await build_scenario(
+        pg_session,
+        capability_ids=fixture["capability_ids"],
+        assumptions=["the integration is stable"],
+        evidence_refs=fixture["fragment_ids"],
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    eval1 = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval1)
+    await pg_session.commit()
+
+    # Material change → committed revision.
+    await _retract_claim_b_verification(pg_session, fixture["claim_ids"][1])
+    r1 = await reassess_scenario(
+        pg_session,
+        scenario["scenario_id"],
+        trigger="new_evidence",
+        requester="t04-tester",
+    )
+    await pg_session.commit()
+    assert r1["revised"] is True
+    assert r1["new_evaluation"]["evidence_coverage"] == 0.5
+
+    # Now call /evaluate — it must NOT overwrite the /reassess's baseline.
+    eval_after = await evaluate_scenario(pg_session, scenario["scenario_id"])
+    await persist_evaluation_snapshot(pg_session, scenario["scenario_id"], eval_after)
+    await pg_session.commit()
+
+    # Final DB state: last_evaluation is the /reassess's new_evaluation
+    # (coverage=0.5), NOT /evaluate's snapshot.
+    entity = (
+        await pg_session.execute(
+            select(EntityRow).where(
+                EntityRow.id == scenario["scenario_id"],
+                EntityRow.kind == "scenario",
+            )
+        )
+    ).scalar_one()
+    attrs = json.loads(entity.attributes)
+    assert attrs["last_evaluation"]["evidence_coverage"] == 0.5, (
+        "last_evaluation must match the /reassess's new_evaluation, not "
+        "the /evaluate snapshot (the /reassess baseline is authoritative "
+        "once last_revised_at is set)"
+    )
+    assert attrs["last_evaluation"] == r1["new_evaluation"]
+    # Version unchanged by /evaluate.
+    assert attrs["version"] == 2

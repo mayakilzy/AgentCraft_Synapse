@@ -25,10 +25,16 @@ Per the approved G06 plan (sections 4.5, 5.3, 9.4, 13.4):
 - **Duplicate revision prevention.** If the same evidence state is
   reassessed twice without intervening KB changes, the second reassessment
   produces no new audit row and ``revised=false``.
-- **Concurrent reassessment safety.** The scenario ``EntityRow`` is
-  loaded with ``SELECT ... FOR UPDATE`` on PostgreSQL (transaction-scoped
-  row lock) before bumping the version, so two concurrent reassessments
-  cannot both publish the same next version.
+- **Atomic reassessment (G06-T04A correction).** The scenario ``EntityRow``
+  is loaded with ``SELECT ... FOR UPDATE`` on PostgreSQL (transaction-scoped
+  row lock) BEFORE reading the authoritative baseline. The new evaluation
+  is computed before the lock (expensive, read-only) but the material-change
+  comparison is revalidated against the LOCKED baseline. If the locked
+  baseline has shifted (because a concurrent reassessment committed
+  first), the second reassessment returns ``revised=False`` without
+  writing an audit row. The version bump + snapshot persistence +
+  audit-row append happen atomically in the same transaction while
+  holding the lock — no partial updates on rollback.
 - **No new ORM tables, migrations, or domain contracts.** Reuses
   ``AuditEventRow``, ``EntityRow``, the G06-T03 evaluator, and the
   existing attributes-JSON persistence convention.
@@ -125,22 +131,28 @@ async def reassess_scenario(
 ) -> dict[str, Any] | None:
     """Reassess a persisted scenario.
 
-    The reassessment flow (per G06 plan §4.5):
+    The reassessment flow (per G06 plan §4.5, with G06-T04A atomicity
+    correction):
 
-    1. Load the current scenario.
-    2. Resolve its relevant evidence and dependencies (the evaluator does
-       this internally — it reads ``current_evidence_refs`` from the
-       scenario attributes and consults the current KB).
-    3. Recompute the scenario evaluation using the existing G06-T03
-       evaluator (``evaluate_scenario``).
-    4. Load the prior authoritative evaluation snapshot.
-    5. Compare the new evaluation with the prior snapshot on material
-       fields only.
-    6. Determine whether a material revision is warranted.
-    7. If warranted: preserve the prior snapshot (append-only audit row),
-       bump the scenario's version, persist the new snapshot as
-       ``last_evaluation`` in the scenario attributes JSON, and emit a
-       ``scenario.revision`` audit event.
+    1. Verify the scenario exists (no lock — read-only).
+    2. Recompute the scenario evaluation using the existing G06-T03
+       evaluator (``evaluate_scenario``). This is expensive (consults
+       the KB) and read-only — it does NOT acquire the row lock.
+    3. Acquire the row lock (``SELECT ... FOR UPDATE`` on PostgreSQL;
+       SQLite serializes writes at the DB level).
+    4. Read the CURRENT authoritative baseline (``last_evaluation``
+       and ``version``) from the LOCKED entity. This is the snapshot
+       that any concurrent reassessment has already committed.
+    5. Compare the new evaluation against the LOCKED baseline on
+       material fields only. This revalidates the expensive computation
+       against the authoritative state.
+    6. If no material change remains: return ``revised=False`` without
+       writing an audit row. (A concurrent reassessment may have
+       already recorded the change.)
+    7. If material change exists: atomically bump the version, persist
+       the new snapshot as ``last_evaluation``, set ``last_revised_at``,
+       and append the ``scenario.revision`` audit event — all in the
+       same transaction while holding the lock.
     8. Return a clear ``revised`` boolean and a structured explanation.
 
     Args:
@@ -165,18 +177,25 @@ async def reassess_scenario(
             f"{sorted(VALID_TRIGGERS)}"
         )
 
-    # ── 1. Load the current scenario ──────────────────────────────────
+    # ── 1. Verify the scenario exists (no lock — read-only) ──────────
+    # This is a quick existence check; the authoritative state is read
+    # under the lock in step 4 below.
     scenario = await get_scenario(session, scenario_id)
     if scenario is None:
         return None
 
-    # ── 2-3. Recompute the evaluation (re-runs G06-T03 evaluator) ─────
+    # ── 2. Recompute the evaluation (read-only, no lock) ─────────────
     # The evaluator reads current_evidence_refs from the scenario's
     # persisted attributes and consults the current KB state for each
-    # fragment's verification status. It re-runs analyze_gap-equivalent
-    # logic for dependency readiness. It is read-only on the scenario
+    # fragment's verification status. It is read-only on the scenario
     # (it does emit a `scenario.evaluated` audit row but does not modify
     # scenario attributes).
+    #
+    # This computation is expensive and may run BEFORE acquiring the
+    # row lock — but its result is REVALIDATED against the locked
+    # baseline in step 5. If a concurrent reassessment committed first,
+    # the locked baseline will reflect that commit, and the material-
+    # change comparison will correctly return revised=False.
     new_evaluation = await evaluate_scenario(
         session, scenario_id, requester=requester
     )
@@ -184,10 +203,27 @@ async def reassess_scenario(
     # scenario exists above.
     assert new_evaluation is not None
 
-    # ── 4. Load the prior authoritative evaluation snapshot ──────────
-    prior_evaluation = await _load_prior_evaluation(session, scenario_id)
+    # ── 3. Acquire the row lock (PG: FOR UPDATE; SQLite: serialized) ──
+    # This serializes concurrent reassessments of the same scenario.
+    # The lock is held until the transaction commits or rolls back.
+    entity = await _load_scenario_entity_for_update(session, scenario_id)
+    if entity is None:
+        # Race: scenario was deleted between step 1 and the lock acquisition.
+        return None
 
-    # ── 5. Compute material changes ──────────────────────────────────
+    # ── 4. Read the CURRENT authoritative baseline (UNDER the lock) ───
+    # This is the snapshot that any concurrent reassessment has already
+    # committed. Reading it under the lock guarantees we see the most
+    # recent committed state, not a stale snapshot from before the lock.
+    attrs: dict[str, Any] = {}
+    if entity.attributes:
+        parsed = _safe_json_loads(entity.attributes)
+        if isinstance(parsed, dict):
+            attrs = parsed
+    prior_evaluation = attrs.get("last_evaluation")
+    prior_version = attrs.get("version", 1)
+
+    # ── 5. Compare against the LOCKED baseline (revalidation) ───────
     if prior_evaluation is None:
         # First reassessment with no prior authoritative snapshot.
         # The new evaluation establishes the baseline — this is a
@@ -202,6 +238,9 @@ async def reassess_scenario(
         revised = len(changes) > 0
 
     # ── 6. If not revised, return without writing an audit row ───────
+    # A concurrent reassessment may have already recorded the change.
+    # The locked baseline reflects that commit; our expensive computation
+    # produced the same result; no revision is warranted.
     if not revised:
         return {
             "scenario_id": scenario_id,
@@ -210,27 +249,18 @@ async def reassess_scenario(
             "new_evaluation": new_evaluation,
             "changes": [],
             "revision_id": None,
+            "prior_version": prior_version,
+            "new_version": prior_version,
             "trigger": trigger,
             "trigger_ref": trigger_ref,
             "reassessed_at": datetime.now(UTC).isoformat(),
             "reassessed_by": requester or "unknown",
         }
 
-    # ── 7. Material revision: bump version, persist snapshot, audit ──
-    # Load the EntityRow with a row-level lock to serialize concurrent
-    # reassessments on PostgreSQL.
-    entity = await _load_scenario_entity_for_update(session, scenario_id)
-    if entity is None:
-        # Race: scenario was deleted between get_scenario and now.
-        return None
-
-    attrs: dict[str, Any] = {}
-    if entity.attributes:
-        parsed = _safe_json_loads(entity.attributes)
-        if isinstance(parsed, dict):
-            attrs = parsed
-
-    prior_version = attrs.get("version", 1)
+    # ── 7. Material revision: atomically bump version, persist ───────
+    # All three operations (version bump + last_evaluation update +
+    # audit-row append) happen in the same transaction while holding
+    # the lock. On rollback, all three are reverted — no partial state.
     new_version = int(prior_version) + 1
     attrs["version"] = new_version
     attrs["last_evaluation"] = new_evaluation
@@ -347,21 +377,36 @@ async def persist_evaluation_snapshot(
 ) -> None:
     """Persist the full evaluation snapshot in the scenario's attributes JSON.
 
-    This is called by the ``/evaluate`` API endpoint after
-    ``evaluate_scenario()`` returns, so that subsequent reassessments can
-    compare against a full prior snapshot (not just the summary fields in
-    the ``scenario.evaluated`` audit row).
+    Called by the ``/evaluate`` API endpoint after ``evaluate_scenario()``
+    returns, so that the next ``/reassess`` call can compare against a
+    full prior snapshot (not just the summary fields in the
+    ``scenario.evaluated`` audit row).
 
-    This is purely additive: the scenario's other fields are not modified.
-    The snapshot is stored under the ``last_evaluation`` key in the
-    attributes JSON. The scenario's ``EntityRow.version`` is NOT bumped
-    (an evaluation is not a revision).
+    **G06-T04A evaluation snapshot safety:**
+
+    - ``/evaluate`` is a READ-ONLY observation. Its persistence of
+      ``last_evaluation`` is a side effect for baseline establishment,
+      NOT a material revision. The scenario's ``EntityRow.version`` is
+      NOT bumped.
+    - ``/evaluate`` establishes the INITIAL non-authoritative observation
+      baseline IF no revision has ever happened (i.e., ``last_revised_at``
+      is not set on the scenario attributes).
+    - Once any ``/reassess`` has been called (setting ``last_revised_at``),
+      the authoritative comparison baseline is the most recent revision's
+      ``new_evaluation`` snapshot. ``/evaluate`` MUST NOT overwrite it
+      (otherwise a stale ``/evaluate`` result could clobber a newer
+      revision baseline — a race-condition protection).
+    - This function acquires the row lock (``SELECT ... FOR UPDATE`` on
+      PostgreSQL) to serialize with concurrent ``/reassess`` calls. The
+      ``last_revised_at`` check happens UNDER the lock, so the
+      "skip-overwrite" decision is authoritative.
+
+    This is purely additive: the scenario's other fields (besides
+    ``last_evaluation`` and ``last_evaluated_at``) are not modified.
     """
-    entity_stmt = select(EntityRow).where(
-        EntityRow.id == scenario_id,
-        EntityRow.kind == "scenario",
-    )
-    entity = (await session.execute(entity_stmt)).scalar_one_or_none()
+    # Acquire the row lock to serialize with concurrent /reassess calls.
+    # On PostgreSQL: SELECT ... FOR UPDATE. On SQLite: serialized writes.
+    entity = await _load_scenario_entity_for_update(session, scenario_id)
     if entity is None:
         # Scenario was deleted between the evaluate call and now. Nothing
         # to persist. The /evaluate endpoint will still return the
@@ -374,6 +419,20 @@ async def persist_evaluation_snapshot(
         parsed = _safe_json_loads(entity.attributes)
         if isinstance(parsed, dict):
             attrs = parsed
+
+    # G06-T04A snapshot safety: if a revision has established an
+    # authoritative baseline (last_revised_at is set), /evaluate MUST NOT
+    # overwrite it. The revision's new_evaluation is the authoritative
+    # comparison snapshot for future reassessments.
+    if attrs.get("last_revised_at") is not None:
+        # No-op: the authoritative baseline is from a /reassess, not /evaluate.
+        # Returning here guarantees a stale /evaluate result cannot
+        # clobber a newer revision's baseline.
+        return
+
+    # No revision has happened yet — establish/update the initial
+    # non-authoritative observation baseline. This is the snapshot
+    # against which the FIRST /reassess will compare.
     attrs["last_evaluation"] = evaluation
     attrs["last_evaluated_at"] = datetime.now(UTC).isoformat()
     entity.attributes = json.dumps(attrs, default=str)

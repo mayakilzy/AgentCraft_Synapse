@@ -37,6 +37,7 @@ demonstrated by a real-service, database-persisted acceptance test.
 | G06-T03 — Scenario Evaluation + Prototype Planning | PASS | `reports/G06_T03_SCENARIO_EVALUATION_PROTOTYPE.md` |
 | G06-T03A — Assumption Evidence Integrity + Hypothesis Selection | PASS | folded into T03 report |
 | G06-T04 — Scenario Revision + End-to-End Acceptance | PASS | `reports/G06_T04_REVISION_E2E_ACCEPTANCE.md` |
+| G06-T04A — Atomic Revision Integrity correction | PASS | folded into T04 report §18 |
 
 **G06 closure**: this report.
 
@@ -259,23 +260,29 @@ Single execution with `SYNAPSE_PG_TEST_URL` set:
 | `test_g05_t06_audit_concurrency.py` | G05-T06 audit append-only + concurrent finalization | 14 |
 | `test_g06_t02_scenario_construction.py` | G06-T02 scenario construction + idempotency | 46 |
 | `test_g06_t03_evaluation_prototype.py` | G06-T03 evaluation + prototype planning | 41 |
-| `test_g06_t04_revision_e2e.py` | G06-T04 revision + e2e (including PG-only concurrency) | 27 (26 SQLite-skippable + 1 PG-only) |
+| `test_g06_t04_revision_e2e.py` | G06-T04 revision + e2e + G06-T04A atomic concurrency | 36 (27 SQLite + 9 PG-only T04A + 1 PG-only T04) |
 
-**Total: 160 passed in 97.18s (0:01:37).**
+**Total: 169 passed in 89.77s** (was 160 in T04; +9 new T04A PG tests).
 
 ### 8.2 PG isolation
 
 Each test module gets its own physical database
 (`synapse_t_<module_label>_<random>`) via
 `tests/integration/conftest.py::pg_engine`. No cross-module
-contamination. The T04 PG-isolated concurrent reassessment test
-(`test_12_concurrent_reassessment_pg_only`) uses `pg_session` and
-exercises `SELECT ... FOR UPDATE` row-level locking.
+contamination. The T04+T04A PG-isolated concurrent reassessment tests
+(`test_12_concurrent_reassessment_pg_only` + 9 new T04A tests) use
+`pg_session` and exercise `SELECT ... FOR UPDATE` row-level locking.
+
+The 9 T04A tests use a `_seed_two_fragment_kb_labeled(session, label)`
+helper with unique IDs per test (e.g., `src-t04c1-a`, `src-t04c2-a`)
+to avoid collisions in the shared module-scoped DB.
 
 ### 8.3 No SQLite-only closure claim
 
 G06 e2e closure is NOT claimed from SQLite-only tests. The combined
-PG suite (including the PG-only concurrent reassessment test) passes.
+PG suite (including all PG-only concurrent reassessment tests) passes.
+
+### 8.4 No brittle sleep-based concurrency tests
 
 ---
 
@@ -394,10 +401,13 @@ G06_T02A_STATUS = PASS
 G06_T03_STATUS = PASS
 G06_T03A_STATUS = PASS
 G06_T04_STATUS = PASS
+G06_T04A_STATUS = PASS
 
 G06_END_TO_END_LIFECYCLE = PASS
-G06_POSTGRESQL_ACCEPTANCE = PASS (160 tests)
-G06_DETERMINISTIC_REGRESSION = PASS (763 tests, 35 PG-skipped, 3 live-deselected)
+G06_POSTGRESQL_ACCEPTANCE = PASS (169 tests; was 160 in T04, +9 T04A PG concurrency tests)
+G06_DETERMINISTIC_REGRESSION = PASS (763 tests, 44 PG-skipped, 3 live-deselected)
+G06_ATOMIC_REASSESSMENT = PASS (T04A)
+G06_EVALUATION_SNAPSHOT_SAFETY = PASS (T04A)
 G06_RUFF = PASS
 G06_OPENAPI = PASS
 G06_CROSS_STAGE_AUDIT = PASS
@@ -410,8 +420,9 @@ MODIFIED_FILES_IN_G06 =
   G06-T02: src/synapse/application/scenario_builder.py, src/synapse/api/v1/future.py, tests/integration/test_g06_t02_scenario_construction.py
   G06-T03: src/synapse/application/scenario_evaluator.py, src/synapse/application/prototype_planner.py, src/synapse/api/v1/future.py, tests/integration/test_g06_t03_evaluation_prototype.py
   G06-T04: src/synapse/application/scenario_revision.py (NEW), src/synapse/api/v1/future.py (MODIFIED), tests/integration/test_g06_t04_revision_e2e.py (NEW)
+  G06-T04A: src/synapse/application/scenario_revision.py (MODIFIED — atomic lock + snapshot safety), tests/integration/test_g06_t04_revision_e2e.py (MODIFIED — +9 PG-only T04A tests + _seed_two_fragment_kb_labeled helper)
 
-FINAL_G06_SHA = 2e0cbe8aac8965cdf5c34241278f0a7231a13be5
+FINAL_G06_SHA = (populated after final T04A commit)
 
 READY_FOR_G06_FINAL_REVIEW = YES
 ```

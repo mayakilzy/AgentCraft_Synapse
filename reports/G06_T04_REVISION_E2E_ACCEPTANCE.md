@@ -1,9 +1,11 @@
-# G06-T04 — Scenario Revision, Evidence Reassessment & End-to-End Acceptance
+# G06-T04 / G06-T04A — Scenario Revision, Evidence Reassessment & End-to-End Acceptance
 
 **Status**: PASS
-**Task**: G06-T04 — Scenario Revision + E2E Acceptance (final task of G06)
+**Task**: G06-T04 — Scenario Revision + E2E Acceptance (final task of G06) + G06-T04A — Atomic Revision Integrity correction
 **Starting SHA**: `1f13c2005db232818f04e3426129dbb166557c79`
-**Final SHA**: `2e0cbe8aac8965cdf5c34241278f0a7231a13be5`
+**T04 Final SHA**: `2e0cbe8aac8965cdf5c34241278f0a7231a13be5`
+**T04A Authoritative start SHA**: `1f095d483245b47ef52956103bb7b06be70fd0e8`
+**T04A Final SHA**: (populated after commit)
 **Date**: 2026-10-11
 **Developer**: GLM
 **Reviewer**: ChatGPT (pending)
@@ -654,6 +656,146 @@ REMAINING_BLOCKERS = None for G06. Pre-existing production blockers
 FINAL_SHA = 2e0cbe8aac8965cdf5c34241278f0a7231a13be5
 
 READY_FOR_G06_FINAL_REVIEW = YES
+```
+
+---
+
+## 18. G06-T04A — Atomic Revision Integrity correction
+
+After the G06-T04 closure, the reviewer identified a transactional
+integrity risk in the reassessment flow: the prior authoritative
+baseline was read BEFORE acquiring the PostgreSQL row lock, so two
+concurrent reassessments could both compare against the same stale
+baseline and publish duplicate revisions.
+
+### 18.1 Atomic reassessment fix
+
+**`reassess_scenario()` was restructured** so that:
+
+1. The scenario existence is verified (no lock — read-only).
+2. The new evaluation is computed via `evaluate_scenario()` (no lock —
+   expensive, read-only). The evaluator reads `current_evidence_refs`
+   from the scenario's persisted attributes and consults the current
+   KB state.
+3. The row lock is acquired (`SELECT ... FOR UPDATE` on PostgreSQL;
+   SQLite serializes writes at the DB level).
+4. The CURRENT authoritative baseline (`last_evaluation` and
+   `version`) is read from the LOCKED entity. This is the snapshot
+   that any concurrent reassessment has already committed.
+5. The new evaluation is compared against the LOCKED baseline on
+   material fields. This revalidates the expensive computation against
+   the authoritative state.
+6. If no material change remains: return `revised=False` without
+   writing an audit row. (A concurrent reassessment may have already
+   recorded the change.)
+7. If material change exists: atomically bump the version, persist the
+   new snapshot as `last_evaluation`, set `last_revised_at`, and append
+   the `scenario.revision` audit event — all in the same transaction
+   while holding the lock. On rollback, all three operations are
+   reverted — no partial state.
+
+### 18.2 Evaluation snapshot safety fix
+
+**`persist_evaluation_snapshot()` was hardened** so that:
+
+1. It acquires the FOR UPDATE row lock to serialize with concurrent
+   `/reassess` calls.
+2. It reads attrs UNDER the lock.
+3. If `attrs["last_revised_at"]` is set (a `/reassess` has established
+   an authoritative baseline), `/evaluate` becomes a no-op — it never
+   overwrites the revision's baseline. This prevents a stale
+   `/evaluate` result from clobbering a newer revision baseline.
+4. Otherwise (no revision yet), `/evaluate` establishes/updates the
+   initial non-authoritative observation baseline. This is the
+   snapshot against which the FIRST `/reassess` will compare.
+
+**Documented `/evaluate` semantics** (per user task brief B.5):
+
+- `/evaluate` is a READ-ONLY observation. Its persistence of
+  `last_evaluation` is a side effect for baseline establishment, NOT
+  a material revision. The scenario's `EntityRow.version` is NOT
+  bumped.
+- `/evaluate` establishes the INITIAL non-authoritative observation
+  baseline IF no revision has ever happened.
+- Once any `/reassess` has been called (setting `last_revised_at`),
+  the authoritative comparison baseline is the most recent revision's
+  `new_evaluation` snapshot. `/evaluate` MUST NOT overwrite it.
+- This function never allows an older evaluation result to overwrite a
+  newer revision.
+
+### 18.3 Deterministic PostgreSQL concurrency tests
+
+9 new PG-only tests added to `tests/integration/test_g06_t04_revision_e2e.py`:
+
+| Test | Scenario | Assertion |
+|------|----------|-----------|
+| `test_t04a_c1_concurrent_same_material_change` | 2 concurrent reassessments of the SAME material change | Exactly 1 returns revised=True (version 1→2); other returns revised=False. Final DB: 1 audit row, version=2, last_evaluation=eval_v2. |
+| `test_t04a_c2_concurrent_no_material_change` | 2 concurrent reassessments with NO KB change | Both return revised=False. Final DB: 0 audit rows, version=1. |
+| `test_t04a_c3_evaluate_racing_with_reassess` | /evaluate + /reassess racing | Final DB consistent: last_evaluation reflects current KB; at most 1 scenario.revision audit row (no duplicates). |
+| `test_t04a_c4_version_monotonicity` | 3 sequential material revisions | Versions 2, 3, 4 strictly increasing; each revision's prior_version = new_version - 1. |
+| `test_t04a_c5_one_revision_per_material_transition` | 3 concurrent reassessments of same change | Exactly 1 wins; other 2 return revised=False. Final DB: 1 audit row. |
+| `test_t04a_c6_snapshot_preservation` | 2 sequential revisions | Each revision's prior_evaluation and new_evaluation snapshots preserved verbatim in the audit row (not overwritten by subsequent revisions). |
+| `test_t04a_c7_rollback_no_partial_updates` | Reassess that acquires lock + bumps version, then rolls back | Version unchanged, no audit row, last_evaluation unchanged. |
+| `test_t04a_c8_repeated_reassessment_after_committed_revision` | 3 no-change reassessments after a committed revision | All return revised=False; version stays 2; 1 audit row. |
+| `test_t04a_c9_evaluate_after_reassess_does_not_clobber` | /evaluate AFTER /reassess has set last_revised_at | /evaluate is a no-op; last_evaluation remains the /reassess's new_evaluation; version unchanged. |
+
+All tests assert FINAL DATABASE STATE, not only response status.
+No timing-dependent sleeps — the PG FOR UPDATE row-level lock
+serializes the concurrent reassessments deterministically.
+
+### 18.4 Test results after T04A correction
+
+- **G06-T04+T04A SQLite** (37 tests, 10 PG-only skipped): 27 passed, 10 skipped.
+- **Combined PG suite** (PRB-03 + G05-T06 + G06-T02/T03/T04+T04A):
+  **169 passed in 89.77s** (was 160 in T04; +9 new T04A PG tests).
+- **Full deterministic regression**: **763 passed, 44 skipped** (was
+  35; +9 new PG-only T04A tests skipped without
+  `SYNAPSE_PG_TEST_URL`), 3 deselected (live) in 187.85s.
+- **Ruff**: clean. **OpenAPI**: OK.
+
+### 18.5 T04A final report block
+
+```
+G06_T04A_STATUS = PASS
+
+AUTHORITATIVE_START_SHA = 1f095d483245b47ef52956103bb7b06be70fd0e8
+ATOMIC_REASSESSMENT = PASS
+LOCKED_BASELINE_COMPARISON = PASS
+EVALUATION_SNAPSHOT_SAFETY = PASS
+DUPLICATE_REVISION_PREVENTION = PASS
+VERSION_MONOTONICITY = PASS
+POSTGRESQL_CONCURRENCY = PASS
+AUDIT_ATOMICITY = PASS
+
+FOCUSED_TESTS =
+  G06-T04+T04A SQLite (37 tests, 10 PG-skipped): 27 passed, 10 skipped
+  G06-T04+T04A combined PG suite: 169 passed in 89.77s
+
+FULL_G06_REGRESSION =
+  G06 SQLite suite (T01+T02+T03+T04+T04A): 154 passed, 10 skipped in 40.83s
+
+FULL_DETERMINISTIC_REGRESSION =
+  763 passed, 44 skipped (PG-only without SYNAPSE_PG_TEST_URL),
+  3 deselected (live) in 187.85s
+
+COMBINED_POSTGRESQL_TESTS =
+  169 passed in 89.77s
+  Files: PRB-03 concurrency + determinism + migration safety +
+  G05-T06 audit concurrency + G06-T02 + G06-T03 + G06-T04+T04A
+
+RUFF = PASS
+OPENAPI = PASS
+
+MODIFIED_FILES =
+  src/synapse/application/scenario_revision.py (MODIFIED — atomic lock + snapshot safety)
+  tests/integration/test_g06_t04_revision_e2e.py (MODIFIED — +9 PG-only T04A tests + _seed_two_fragment_kb_labeled helper)
+
+REMAINING_LIMITATIONS =
+  Same as T04 (see §14). No new limitations introduced by T04A.
+
+FINAL_SHA = (populated after commit)
+
+G06_READY_FOR_FINAL_CLOSURE = YES
 ```
 
 ---
